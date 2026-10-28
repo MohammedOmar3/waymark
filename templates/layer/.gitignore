@@ -5,3 +5,4 @@ inbox/
 *.log
 *.tmp
 *.bak
+active/.compact-pending-*

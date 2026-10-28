@@ -6,10 +6,12 @@
 # ---------------------------------------------------------------- time ----
 if [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || { [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 2 ]; }; then
   wm_now() { printf '%(%Y-%m-%dT%H:%M:%S)T\n' -1; }
+  wm__now() { printf -v WM_NOW '%(%Y-%m-%dT%H:%M:%S)T' -1; }   # no subshell
   wm_today() { printf '%(%Y-%m-%d)T\n' -1; }
   wm__epoch() { printf '%(%s)T' -1; }
 else
   wm_now() { date +%Y-%m-%dT%H:%M:%S; }
+  wm__now() { WM_NOW="$(date +%Y-%m-%dT%H:%M:%S)"; }
   wm_today() { date +%Y-%m-%d; }
   wm__epoch() { date +%s; }
 fi
@@ -34,12 +36,19 @@ wm_path() {
 # ----------------------------------------------------------------- conf ----
 # wm_conf_get <file> <key>
 wm_conf_get() {
+  wm__conf_get "$1" "$2" || return 1
+  printf '%s\n' "$WM_CV"
+}
+
+# wm__conf_get <file> <key> -> WM_CV (no subshell; for hot paths)
+wm__conf_get() {
   local line
+  WM_CV=""
   [ -f "$1" ] || return 1
   while IFS= read -r line || [ -n "$line" ]; do
     line="${line%$'\r'}"
     case "$line" in
-      "$2="*) printf '%s\n' "${line#*=}"; return 0 ;;
+      "$2="*) WM_CV="${line#*=}"; return 0 ;;
     esac
   done < "$1"
   return 1
@@ -65,15 +74,21 @@ wm_conf_set() {
 
 # wm_layer_root -> prints layer path; exit 1 if no valid layer.
 wm_layer_root() {
-  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" c r
+  wm__layer_find || return 1
+  printf '%s\n' "$WM_LAYER"
+}
+
+# wm__layer_find -> WM_LAYER (no subshell unless a Windows path needs converting)
+wm__layer_find() {
+  local cfg="${CLAUDE_CONFIG_DIR:-$HOME/.claude}" c
   for c in "${WAYMARK_ROOT:-}" "__CONF__" "$cfg/waymark"; do
     if [ "$c" = "__CONF__" ]; then
-      r="$(wm_conf_get "$cfg/waymark.conf" root)" || continue
-      c="$r"
+      wm__conf_get "$cfg/waymark.conf" root || continue
+      c="$WM_CV"
     fi
     case "$c" in *'\'*|[A-Za-z]:*) c="$(wm_path "$c")" ;; esac
     if [ -n "$c" ] && [ -f "$c/layer.conf" ]; then
-      printf '%s\n' "$c"
+      WM_LAYER="$c"
       return 0
     fi
   done
@@ -86,19 +101,25 @@ wm_layer_root() {
 # (e.g. separate git dir, bare repo) fall back to basename of the toplevel;
 # "none" outside git. Uses git -C, so no cd and no CDPATH exposure.
 wm_repo_name() {
+  wm__repo_name "$@"
+  printf '%s\n' "$WM_RN"
+}
+
+# wm__repo_name [dir] -> WM_RN (one git spawn, no extra subshell)
+wm__repo_name() {
   local dir="${1:-.}" common parent top
   common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
   common="${common%/}"
   case "$common" in
     */.git)
       parent="${common%/.git}"
-      if [ -n "${parent##*/}" ]; then printf '%s\n' "${parent##*/}"; return 0; fi
+      if [ -n "${parent##*/}" ]; then WM_RN="${parent##*/}"; return 0; fi
       ;;
   esac
   top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"
   top="${top%/}"
-  if [ -n "${top##*/}" ]; then printf '%s\n' "${top##*/}"; return 0; fi
-  printf 'none\n'
+  if [ -n "${top##*/}" ]; then WM_RN="${top##*/}"; return 0; fi
+  WM_RN=none
 }
 
 # Awk JSON scanner (run under LC_ALL=C). WM_K is a newline-separated list of
@@ -161,13 +182,21 @@ END {
 
 # wm_repo_tags [dir] -> sorted unique tags from package.json deps via layer tags.conf
 wm_repo_tags() {
-  local dir="${1:-.}" layer pkg names n line g tag tags="" t
+  wm__repo_tags "$@"
+  [ -z "$WM_TG" ] || printf '%s\n' "$WM_TG"
+}
+
+# wm__repo_tags [dir] -> WM_TG (space-separated; empty when none). Spawns one
+# awk (reads package.json directly); dedupe and sort are done in bash.
+wm__repo_tags() {
+  local dir="${1:-.}" layer names n line g tag i j
+  local -a arr=()
+  WM_TG=""
   [ -f "$dir/package.json" ] || return 0
-  layer="$(wm_layer_root)" || return 0
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
   [ -f "$layer/tags.conf" ] || return 0
-  pkg="$(<"$dir/package.json")"
-  case "$pkg" in *$'\n'*) pkg="${pkg//$'\n'/ }" ;; esac
-  names="$(printf '%s' "$pkg" | LC_ALL=C WM_MODE=keys WM_K=$'dependencies\ndevDependencies' awk "$WM__AWK")"
+  names="$(LC_ALL=C WM_MODE=keys WM_K=$'dependencies\ndevDependencies' awk "$WM__AWK" "$dir/package.json")"
   while [ -n "$names" ]; do
     case "$names" in *$'\n'*) n="${names%%$'\n'*}"; names="${names#*$'\n'}" ;; *) n="$names"; names="" ;; esac
     while IFS= read -r line || [ -n "$line" ]; do
@@ -175,13 +204,17 @@ wm_repo_tags() {
       case "$line" in ''|'#'*) continue ;; esac
       g="${line%%=*}"; tag="${line#*=}"
       # shellcheck disable=SC2053
-      if [[ $n == $g ]]; then tags="$tags$tag"$'\n'; break; fi
+      if [[ $n == $g ]]; then
+        for j in ${arr[@]+"${arr[@]}"}; do [ "$j" = "$tag" ] && continue 2; done
+        i=${#arr[@]}
+        while [ "$i" -gt 0 ] && [[ ${arr[$((i - 1))]} > $tag ]]; do arr[$i]="${arr[$((i - 1))]}"; i=$((i - 1)); done
+        arr[$i]="$tag"
+        break
+      fi
     done < "$layer/tags.conf"
   done
-  [ -n "$tags" ] || return 0
-  tags="$(printf '%s' "$tags" | sort -u)"
-  t="${tags//$'\n'/ }"
-  printf '%s\n' "$t"
+  [ ${#arr[@]} -gt 0 ] || return 0
+  WM_TG="${arr[*]}"
 }
 
 # ----------------------------------------------------------------- json ----
@@ -261,14 +294,32 @@ wm__json_scan() {
 # Sets <prefix>_<sanitized key> for each key (dots -> _), empty when absent or
 # null, and <prefix>__missing (space-separated absent keys). One awk spawn total.
 wm_json_read() {
-  local json="$1" prefix="$2" k keys="" out line key rest t v found=$'\n' missing=""
+  local json="$1" prefix="$2" k keys=""
   shift 2
+  for k in "$@"; do keys="$keys$k"$'\n'; done
+  wm__json_scan "$json" "$keys"
+  wm__json_assign "$prefix" "$@"
+}
+
+# wm_json_read_stdin <prefix> <key>...  Same as wm_json_read but the awk scanner
+# reads the JSON straight from stdin: no printf pipeline, no copy of a large
+# payload through a shell variable. Consumes stdin.
+wm_json_read_stdin() {
+  local prefix="$1" k keys=""
+  shift
+  for k in "$@"; do keys="$keys$k"$'\n'; done
+  WM_JOUT="$(LC_ALL=C WM_MODE=val WM_K="$keys" awk "$WM__AWK")"
+  wm__json_assign "$prefix" "$@"
+}
+
+# wm__json_assign <prefix> <key>... : turn $WM_JOUT into variables
+wm__json_assign() {
+  local prefix="$1" k out line key rest t v found=$'\n' missing=""
+  shift
   for k in "$@"; do
-    keys="$keys$k"$'\n'
     wm__san "$k"
     printf -v "${prefix}_$WM_SAN" '%s' ""
   done
-  wm__json_scan "$json" "$keys"
   out="$WM_JOUT"
   while [ -n "$out" ]; do
     case "$out" in *$'\n'*) line="${out%%$'\n'*}"; out="${out#*$'\n'}" ;; *) line="$out"; out="" ;; esac
