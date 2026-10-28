@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+# waymark SessionEnd hook (spec section 8, rulings R6/R16/R18).
+# Synchronously: append this session's worklog entry (once per id8), copy the
+# handoff into repos/<repo>.md, delete the session's active file. Then the
+# autosave commit and the viewer rebuild run as one detached background job
+# (WAYMARK_SESSION_END_SYNC=1 runs it in the foreground, for tests).
+# Failures go to active/.session-end.log. Always exits 0, prints nothing.
+# No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+se_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && se_dir="$PWD" ;;
+  *) se_dir="$PWD" ;;
+esac
+se_plugin="${se_dir%/*}"
+. "$se_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard SessionEnd
+
+se_log() { # <layer> <message>
+  wm__now
+  [ -d "$1/active" ] || mkdir -p "$1/active" 2>/dev/null
+  printf '%s session-end: %s\n' "$WM_NOW" "$2" >> "$1/active/.session-end.log" 2>/dev/null
+  return 0
+}
+
+# se_handoff <layer> <repo> <text>: set the **Handoff:** line of repos/<repo>.md
+se_handoff() {
+  local layer="$1" repo="$2" text="$3" f tmpl tmp content locked=0
+  f="$layer/repos/$repo.md"
+  [ -d "$layer/repos" ] || mkdir -p "$layer/repos" 2>/dev/null
+  wm__lockq "$layer" "repo-$repo" && locked=1
+  if [ ! -f "$f" ]; then
+    tmpl="$layer/repos/_template.md"
+    [ -f "$tmpl" ] || tmpl="$se_plugin/templates/layer/repos/_template.md"
+    if [ -f "$tmpl" ]; then
+      content="$(<"$tmpl")"
+    else
+      content="# <repo>"$'\n\n**Handoff:**'
+    fi
+    printf '%s\n' "${content//<repo>/$repo}" > "$f" 2>/dev/null || {
+      [ "$locked" = 0 ] || wm__unlockq "$layer" "repo-$repo"
+      se_log "$layer" "cannot create $f"; return 0; }
+  fi
+  tmp="$f.tmp.$$"
+  WM_TXT="$text" awk -v BINMODE=3 '
+  BEGIN { cr = sprintf("%c", 13) }
+  { line = $0; sub(/\r$/, "", line) }
+  substr(line, 1, 12) == "**Handoff:**" && !done {
+    c = ($0 ~ /\r$/) ? cr : ""
+    print "**Handoff:** " ENVIRON["WM_TXT"] c; done = 1; next
+  }
+  { print }
+  END { if (!done) print "**Handoff:** " ENVIRON["WM_TXT"] }' "$f" > "$tmp" 2>/dev/null && mv -f "$tmp" "$f" 2>/dev/null || se_log "$layer" "cannot update $f"
+  [ ! -e "$tmp" ] || rm -f "$tmp" 2>/dev/null
+  [ "$locked" = 0 ] || wm__unlockq "$layer" "repo-$repo"
+  return 0
+}
+
+# se_background <layer> <id8>: autosave commit, then the viewer rebuild
+se_background() {
+  local layer="$1" id8="$2" rc
+  wm_commit "chore: autosave session $id8"; rc=$?
+  case "$rc" in
+    0) ;;
+    2) se_log "$layer" "autosave refused: scan failed (see active/.scan-failed.log)" ;;
+    *) se_log "$layer" "autosave failed (rc $rc)" ;;
+  esac
+  if [ -f "$se_plugin/bin/cmd/view.sh" ]; then
+    bash "$se_plugin/bin/waymark" view --no-open >/dev/null 2>&1 || se_log "$layer" "viewer rebuild failed"
+  fi
+  return 0
+}
+
+se_main() {
+  local layer id8 cwd act f line v nl=$'\n'
+  local repo="" started="" task="" status="" files="" handoff="" have_act=0 alocked=0
+  local h_session_id h_cwd h_reason h__missing
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+
+  wm_json_read_stdin h session_id cwd reason
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
+  cwd="$h_cwd"
+  case "$cwd" in *\\*|[A-Za-z]:*) cwd="$(wm_path "$cwd")" ;; esac
+  [ -n "$cwd" ] || cwd="$se_pwd"
+
+  # ---- read the active file under its lock ----
+  act=""
+  for f in "$layer"/active/*"--$id8.md"; do [ -f "$f" ] && { act="$f"; break; }; done
+  if [ -n "$act" ]; then
+    wm__lockq "$layer" "active-$id8" && alocked=1
+    [ "$alocked" = 1 ] || se_log "$layer" "active lock busy; reading anyway"
+    if [ -f "$act" ]; then
+      have_act=1
+      while IFS= read -r line || [ -n "$line" ]; do
+        line="${line%$'\r'}"
+        case "$line" in
+          'repo:'*) v="${line#repo:}"; repo="${v# }" ;;
+          'started:'*) v="${line#started:}"; started="${v# }" ;;
+          'task:'*) v="${line#task:}"; task="${v# }" ;;
+          'status:'*) v="${line#status:}"; status="${v# }" ;;
+          'files touched:'*) v="${line#files touched:}"; files="${v# }" ;;
+          'handoff:'*) v="${line#handoff:}"; handoff="${v# }" ;;
+        esac
+      done < "$act"
+    fi
+  fi
+  if [ -z "$repo" ]; then
+    wm__repo_name "$cwd"; repo="${WM_RN:-none}"
+  fi
+  [ -n "$task" ] || task="untitled"
+  [ -n "$status" ] || status="unknown"
+  [ -n "$started" ] || started="unknown"
+
+  wm__now
+  local ended="$WM_NOW" stamp
+  stamp="${WM_NOW%%T*} ${WM_NOW#*T}"; stamp="${stamp:0:16}"
+
+  # ---- commits since started, in the session's repo ----
+  local commits="none" log
+  if [ "$repo" != none ] && [ "$started" != unknown ] && [ -d "$cwd" ]; then
+    log="$(git -C "$cwd" log --since="$started" --format='%h %s' -n 10 2>/dev/null)"
+    if [ -n "$log" ]; then
+      commits="${log//$'\r'/}"
+      commits="${commits//$nl/; }"
+    fi
+  fi
+
+  # ---- files touched ----
+  local nfiles=0 first="" rest oldifs item
+  if [ -n "$files" ]; then
+    rest="$files"
+    while [ -n "$rest" ]; do
+      case "$rest" in
+        *", "*) item="${rest%%, *}"; rest="${rest#*, }" ;;
+        *) item="$rest"; rest="" ;;
+      esac
+      [ -n "$item" ] || continue
+      nfiles=$((nfiles + 1))
+      if [ "$nfiles" -le 10 ]; then first="${first:+$first, }$item"; fi
+    done
+  fi
+  local ftxt="$nfiles"
+  [ "$nfiles" -eq 0 ] || ftxt="$nfiles ($first)"
+
+  # ---- capture counts ----
+  local cand=0 rec=0 dis=0 def=0 st rows
+  if [ -s "$layer/inbox/$id8.md" ]; then
+    wm_tri_cmd=__lib
+    if . "$se_plugin/bin/cmd/triage.sh" 2>/dev/null; then
+      rows="$(wm_tri_list_raw "$layer/inbox/$id8.md")"
+      set -f
+      oldifs="$IFS"; IFS=$'\n'
+      for line in $rows; do
+        IFS="$oldifs"
+        st="${line#*$'\t'}"; st="${st%%$'\t'*}"; st="${st%$'\r'}"; st="${st%% *}"
+        cand=$((cand + 1))
+        case "$st" in
+          recorded) rec=$((rec + 1)) ;;
+          dismissed) dis=$((dis + 1)) ;;
+          deferred) def=$((def + 1)) ;;
+        esac
+        IFS=$'\n'
+      done
+      IFS="$oldifs"; set +f
+    else
+      se_log "$layer" "cannot load triage helpers"
+    fi
+  fi
+
+  # ---- recall hits ----
+  local hits=0
+  if [ -f "$layer/stats/recall.tsv" ]; then
+    hits="$(awk -F '\t' -v id="$id8" '{ sub(/\r$/, "") } $2 == id && $1 != "date" { n++ } END { print n + 0 }' "$layer/stats/recall.tsv" 2>/dev/null)"
+    [ -n "$hits" ] || hits=0
+  fi
+
+  # ---- worklog entry, once per session ----
+  local htxt="none" wl="$layer/worklog.md" existing wlocked=0 entry
+  [ -z "$handoff" ] || htxt="$handoff"
+  entry="$nl## $stamp — $repo — $task$nl- **Session:** $id8, $started to $ended, status $status$nl- **Commits:** $commits$nl- **Files touched:** $ftxt$nl- **Capture:** $cand candidates, $rec recorded, $dis dismissed, $def deferred$nl- **Recall hits:** $hits$nl- **Handoff:** $htxt$nl"
+  wm__lockq "$layer" worklog && wlocked=1
+  [ "$wlocked" = 1 ] || se_log "$layer" "worklog lock busy; appending anyway"
+  existing=""
+  [ ! -f "$wl" ] || existing="$(<"$wl")"
+  case "$existing" in
+    *"- **Session:** $id8, "*) se_log "$layer" "entry for $id8 already in worklog; skipped" ;;
+    *) printf '%s' "$entry" >> "$wl" 2>/dev/null || se_log "$layer" "cannot append to worklog.md" ;;
+  esac
+  existing=""
+  [ "$wlocked" = 0 ] || wm__unlockq "$layer" worklog
+
+  # ---- handoff into the repo file ----
+  if [ -n "$handoff" ] && [ "$repo" != none ]; then
+    se_handoff "$layer" "$repo" "$handoff"
+  fi
+
+  # ---- delete the active file, release its lock ----
+  if [ "$have_act" = 1 ]; then
+    rm -f "$act" 2>/dev/null || se_log "$layer" "cannot delete $act"
+  fi
+  [ "$alocked" = 0 ] || wm__unlockq "$layer" "active-$id8"
+
+  # ---- autosave + viewer: detached unless the test hook asks otherwise ----
+  if [ "${WAYMARK_SESSION_END_SYNC:-}" = 1 ]; then
+    se_background "$layer" "$id8" </dev/null >>"$layer/active/.session-end.log" 2>&1
+  else
+    ( se_background "$layer" "$id8" ) </dev/null >>"$layer/active/.session-end.log" 2>&1 &
+    disown 2>/dev/null
+  fi
+  return 0
+}
+
+se_main
+exit 0
