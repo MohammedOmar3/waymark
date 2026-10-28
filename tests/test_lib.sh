@@ -250,3 +250,85 @@ test_commit_index_lock_retry() {
   wm_commit "never"; t_eq 3 "$?" "lock never cleared -> 3"
   rm -f "$layer/.git/index.lock"
 }
+
+test_json_read_batch() {
+  t_lib
+  local j='{
+  "session_id": "sid-1",
+  "cwd": "C:\\Users\\x",
+  "tool_input": {"command": "echo \"hi\"\nthere", "file-path": "/a b"},
+  "stop_hook_active": true,
+  "n": 7,
+  "x": null
+}'
+  local J_session_id="stale" J__missing
+  wm_json_read "$j" J session_id cwd tool_input.command stop_hook_active n tool_input.file-path x nope.key
+  t_eq "sid-1" "$J_session_id" "read: top-level"
+  t_eq 'C:\Users\x' "$J_cwd" "read: unescaped path"
+  t_eq 'echo "hi"
+there' "$J_tool_input_command" "read: nested string"
+  t_eq "true" "$J_stop_hook_active" "read: bool"
+  t_eq "7" "$J_n" "read: number"
+  t_eq "/a b" "$J_tool_input_file_path" "read: hyphen sanitized"
+  t_eq "" "$J_x" "read: null is empty"
+  t_eq "x nope.key" "$J__missing" "read: missing list"
+  # spawn count: shim awk with a counting wrapper
+  local bin="$WM_SANDBOX_DIR/shim" cnt="$WM_SANDBOX_DIR/awkcount" real
+  real="$(command -v awk)"
+  mkdir -p "$bin"; : > "$cnt"
+  printf '#!/bin/sh\necho x >> "%s"\nexec "%s" "$@"\n' "$cnt" "$real" > "$bin/awk"; chmod +x "$bin/awk"
+  PATH="$bin:$PATH" wm_json_read "$j" J session_id cwd tool_input.command stop_hook_active n
+  t_eq "1" "$(wc -l < "$cnt" | tr -d ' ')" "read: five keys use one awk spawn"
+  t_eq "" "$(wm_json_str '{"k":null}' k)" "str on null prints nothing"
+}
+
+test_json_large_input_linear() {
+  t_lib
+  local big j t0 t1
+  big="$(head -c 1048576 /dev/zero | tr '\0' 'a')"
+  j='{"session_id":"sid","tool_input":{"file_path":"/p/q.txt","content":"'"$big"'","tail":"end"},"hook_event_name":"PreToolUse"}'
+  t0=$(date +%s%N 2>/dev/null || echo 0)
+  wm_json_read "$j" J session_id tool_input.file_path tool_input.tail hook_event_name
+  t1=$(date +%s%N 2>/dev/null || echo 0)
+  t_eq "sid|/p/q.txt|end|PreToolUse" "$J_session_id|$J_tool_input_file_path|$J_tool_input_tail|$J_hook_event_name" "1MB input parsed correctly"
+  local ms=$(( (t1 - t0) / 1000000 ))
+  echo "  timing: 1MB wm_json_read = ${ms} ms" >&2
+  if [ "$ms" -lt 1000 ]; then t_eq ok ok "1MB under 1s (${ms} ms)"; else t_eq "<1000ms" "${ms}ms" "1MB under 1s"; fi
+  # multibyte content must not change cost class
+  local ar; ar="$(printf 'مرحبا%.0s' $(seq 1 20000))"
+  j='{"a":"'"$ar"'","b":"ok"}'
+  t0=$(date +%s%N); wm_json_read "$j" K b; t1=$(date +%s%N)
+  ms=$(( (t1 - t0) / 1000000 ))
+  echo "  timing: ${#j}-char Arabic input = ${ms} ms" >&2
+  if [ "$ms" -lt 1000 ] && [ "$K_b" = ok ]; then t_eq ok ok "multibyte input under 1s"; else t_eq "ok<1s" "$K_b ${ms}ms" "multibyte input under 1s"; fi
+}
+
+test_repo_name_fallback_toplevel() {
+  t_lib
+  local d="$WM_SANDBOX_DIR/f"
+  mkdir -p "$d"
+  git init -q --separate-git-dir="$d/sep.git" "$d/proj" 2>/dev/null
+  t_eq "proj" "$(wm_repo_name "$d/proj")" "separate git dir falls back to toplevel"
+  t_eq "proj" "$(CDPATH="$d" wm_repo_name "$d/proj")" "CDPATH does not matter"
+}
+
+test_lock_stale_steal_race() {
+  t_lib
+  local layer="$WM_SANDBOX_DIR/layer" ctr="$WM_SANDBOX_DIR/ctr" f="$WM_SANDBOX_DIR/out"
+  t_mk_layer "$layer"; export WAYMARK_ROOT="$layer"
+  mkdir -p "$layer/.locks/s"
+  touch -d '2 minutes ago' "$layer/.locks/s" 2>/dev/null || { t_eq ok ok "touch -d unsupported; skipped"; return 0; }
+  printf '0' > "$ctr"; : > "$f"
+  worker() {
+    local i n
+    for i in 1 2 3 4 5 6 7 8 9 10; do
+      wm_lock s || { echo LOCKFAIL >> "$f"; return 1; }
+      n="$(cat "$ctr")"; sleep 0.02; printf '%s' $((n+1)) > "$ctr"
+      wm_unlock s
+    done
+  }
+  worker & worker & worker & wait
+  t_eq "30" "$(cat "$ctr")" "no lost increments with 3 waiters on a stale lock"
+  t_not_contains "$(cat "$f")" LOCKFAIL "no lock failures"
+  t_eq "" "$(ls "$layer/.locks")" "no leftover lock or stale dirs"
+}

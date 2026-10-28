@@ -60,7 +60,7 @@ wm_conf_set() {
     done < "$f"
   fi
   [ "$done_" = 1 ] || printf '%s=%s\n' "$k" "$v" >> "$tmp"
-  mv -f "$tmp" "$f"
+  mv -f "$tmp" "$f" || { rm -f "$tmp"; return 1; }
 }
 
 # wm_layer_root -> prints layer path; exit 1 if no valid layer.
@@ -69,8 +69,9 @@ wm_layer_root() {
   for c in "${WAYMARK_ROOT:-}" "__CONF__" "$cfg/waymark"; do
     if [ "$c" = "__CONF__" ]; then
       r="$(wm_conf_get "$cfg/waymark.conf" root)" || continue
-      c="$(wm_path "$r")"
+      c="$r"
     fi
+    case "$c" in *'\'*|[A-Za-z]:*) c="$(wm_path "$c")" ;; esac
     if [ -n "$c" ] && [ -f "$c/layer.conf" ]; then
       printf '%s\n' "$c"
       return 0
@@ -80,22 +81,32 @@ wm_layer_root() {
 }
 
 # ----------------------------------------------------------------- repo ----
-# wm_repo_name [dir] -> basename of the main worktree's root; "none" outside git.
+# wm_repo_name [dir] -> spec §6: basename of the parent of the absolute git
+# common dir (so linked worktrees map to the main repo); if that is unusable
+# (e.g. separate git dir, bare repo) fall back to basename of the toplevel;
+# "none" outside git. Uses git -C, so no cd and no CDPATH exposure.
 wm_repo_name() {
-  local common
-  common="$(cd "${1:-.}" 2>/dev/null && c="$(git rev-parse --git-common-dir 2>/dev/null)" && cd "$c" 2>/dev/null && pwd)" || { printf 'none\n'; return 0; }
-  [ -n "$common" ] || { printf 'none\n'; return 0; }
+  local dir="${1:-.}" common parent top
+  common="$(git -C "$dir" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"
   common="${common%/}"
   case "$common" in
-    */.git) common="${common%/.git}" ;;
-    *.git) common="${common%.git}" ;;
+    */.git)
+      parent="${common%/.git}"
+      if [ -n "${parent##*/}" ]; then printf '%s\n' "${parent##*/}"; return 0; fi
+      ;;
   esac
-  printf '%s\n' "${common##*/}"
+  top="$(git -C "$dir" rev-parse --show-toplevel 2>/dev/null)"
+  top="${top%/}"
+  if [ -n "${top##*/}" ]; then printf '%s\n' "${top##*/}"; return 0; fi
+  printf 'none\n'
 }
 
-# Awk JSON scanner. WM_MODE=val: print "s<raw string>" or "l<literal>" for the
-# value at dotted path WM_K (exit 1 if absent). WM_MODE=keys: print each key of
-# the object at path WM_K. Strings are returned still escaped.
+# Awk JSON scanner (run under LC_ALL=C). WM_K is a newline-separated list of
+# dotted key paths.
+#   WM_MODE=val : for each scalar at a wanted path print "<path>\t<t><raw>"
+#                 (t = s string / l literal); first occurrence wins; stops once
+#                 every wanted path was found. Strings stay escaped.
+#   WM_MODE=keys: print each key of the object at any wanted path.
 WM__AWK='
 function jstr(   j, c) {
   j = i + 1
@@ -114,10 +125,12 @@ function path(n,   s, m) {
   for (m = 2; m <= n; m++) s = s "." key[m]
   return s
 }
-{ buf = buf $0 "\n" }
+{ buf = buf $0 " " }
 END {
-  len = length(buf); i = 1; d = 0; found = 0
-  mode = ENVIRON["WM_MODE"]; t = ENVIRON["WM_K"]
+  len = length(buf); i = 1; d = 0
+  mode = ENVIRON["WM_MODE"]
+  n = split(ENVIRON["WM_K"], arr, "\n"); left = 0
+  for (m = 1; m <= n; m++) if (arr[m] != "") { want[arr[m]] = 1; left++ }
   while (i <= len) {
     c = substr(buf, i, 1)
     if (c == " " || c == "\t" || c == "\n" || c == "\r" || c == ":") { i++; continue }
@@ -128,18 +141,22 @@ END {
     if (c == "\"") {
       jstr()
       if (typ[d] == "o" && ek[d]) {
-        if (mode == "keys" && path(d - 1) == t) print sval
+        if (mode == "keys" && (path(d - 1) in want)) print sval
         key[d] = sval; ek[d] = 0
-      } else if (mode == "val" && path(d) == t) { print "s" sval; found = 1; exit }
+      } else if (mode == "val") {
+        p = path(d)
+        if ((p in want) && !(p in seen)) { print p "\ts" sval; seen[p] = 1; if (--left == 0) exit }
+      }
       continue
     }
     j = i
     while (j <= len && index(",}] \t\r\n", substr(buf, j, 1)) == 0) j++
     lit = substr(buf, i, j - i); i = j
-    if (mode == "val" && path(d) == t) { print "l" lit; found = 1; exit }
+    if (mode == "val") {
+      p = path(d)
+      if ((p in want) && !(p in seen)) { print p "\tl" lit; seen[p] = 1; if (--left == 0) exit }
+    }
   }
-  if (mode == "keys") exit 0
-  exit (found ? 0 : 1)
 }'
 
 # wm_repo_tags [dir] -> sorted unique tags from package.json deps via layer tags.conf
@@ -149,10 +166,10 @@ wm_repo_tags() {
   layer="$(wm_layer_root)" || return 0
   [ -f "$layer/tags.conf" ] || return 0
   pkg="$(<"$dir/package.json")"
-  names="$(printf '%s' "$pkg" | WM_MODE=keys WM_K=dependencies awk "$WM__AWK"
-           printf '%s' "$pkg" | WM_MODE=keys WM_K=devDependencies awk "$WM__AWK")"
-  while IFS= read -r n; do
-    [ -n "$n" ] || continue
+  case "$pkg" in *$'\n'*) pkg="${pkg//$'\n'/ }" ;; esac
+  names="$(printf '%s' "$pkg" | LC_ALL=C WM_MODE=keys WM_K=$'dependencies\ndevDependencies' awk "$WM__AWK")"
+  while [ -n "$names" ]; do
+    case "$names" in *$'\n'*) n="${names%%$'\n'*}"; names="${names#*$'\n'}" ;; *) n="$names"; names="" ;; esac
     while IFS= read -r line || [ -n "$line" ]; do
       line="${line%$'\r'}"
       case "$line" in ''|'#'*) continue ;; esac
@@ -160,9 +177,7 @@ wm_repo_tags() {
       # shellcheck disable=SC2053
       if [[ $n == $g ]]; then tags="$tags$tag"$'\n'; break; fi
     done < "$layer/tags.conf"
-  done <<EOT
-$names
-EOT
+  done
   [ -n "$tags" ] || return 0
   tags="$(printf '%s' "$tags" | sort -u)"
   t="${tags//$'\n'/ }"
@@ -220,13 +235,66 @@ wm__unescape() {
   done
 }
 
+# wm__san <key> -> WM_SAN : key made safe for a variable name (non [A-Za-z0-9_] -> _)
+wm__san() {
+  local k="$1" out="" c
+  case "$k" in
+    *[!A-Za-z0-9_]*)
+      while [ -n "$k" ]; do
+        c="${k:0:1}"; k="${k:1}"
+        case "$c" in [A-Za-z0-9_]) out="$out$c" ;; *) out="${out}_" ;; esac
+      done
+      WM_SAN="$out" ;;
+    *) WM_SAN="$k" ;;
+  esac
+}
+
+# wm__json_scan <json> <newline-separated dotted keys> -> WM_JOUT
+# One awk spawn; awk runs byte-wise (LC_ALL=C) so the scan is linear.
+wm__json_scan() {
+  local j="$1"
+  case "$j" in *$'\n'*) j="${j//$'\n'/ }" ;; esac
+  WM_JOUT="$(printf '%s' "$j" | LC_ALL=C WM_MODE=val WM_K="$2" awk "$WM__AWK")"
+}
+
+# wm_json_read <json> <prefix> <key>...
+# Sets <prefix>_<sanitized key> for each key (dots -> _), empty when absent or
+# null, and <prefix>__missing (space-separated absent keys). One awk spawn total.
+wm_json_read() {
+  local json="$1" prefix="$2" k keys="" out line key rest t v found=$'\n' missing=""
+  shift 2
+  for k in "$@"; do
+    keys="$keys$k"$'\n'
+    wm__san "$k"
+    printf -v "${prefix}_$WM_SAN" '%s' ""
+  done
+  wm__json_scan "$json" "$keys"
+  out="$WM_JOUT"
+  while [ -n "$out" ]; do
+    case "$out" in *$'\n'*) line="${out%%$'\n'*}"; out="${out#*$'\n'}" ;; *) line="$out"; out="" ;; esac
+    key="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+    t="${rest:0:1}"; v="${rest:1}"
+    if [ "$t" = s ]; then wm__unescape "$v"; v="$WM_U"
+    elif [ "$v" = null ]; then continue; fi
+    wm__san "$key"
+    printf -v "${prefix}_$WM_SAN" '%s' "$v"
+    found="$found$key"$'\n'
+  done
+  for k in "$@"; do
+    case "$found" in *$'\n'"$k"$'\n'*) ;; *) missing="$missing $k" ;; esac
+  done
+  printf -v "${prefix}__missing" '%s' "${missing# }"
+  return 0
+}
+
 # wm__json_get <json> <dotted.key> -> WM_JT (s|l) and WM_JV (raw); rc 1 if absent
 wm__json_get() {
-  local out
-  out="$(printf '%s' "$1" | WM_MODE=val WM_K="$2" awk "$WM__AWK")" || return 1
-  [ -n "$out" ] || return 1
-  WM_JT="${out:0:1}"
-  WM_JV="${out:1}"
+  local rest
+  wm__json_scan "$1" "$2"
+  [ -n "$WM_JOUT" ] || return 1
+  rest="${WM_JOUT#*$'\t'}"
+  WM_JT="${rest:0:1}"
+  WM_JV="${rest:1}"
 }
 
 wm_json_str() {
@@ -235,8 +303,10 @@ wm_json_str() {
     wm__unescape "$WM_JV"
     printf '%s\n' "$WM_U"
   else
-    case "$WM_JV" in null|true|false|-[0-9]*|[0-9]*) printf '%s\n' "$WM_JV" ;; *) return 1 ;; esac
-    [ "$WM_JV" != null ] || return 1
+    case "$WM_JV" in
+      true|false|-[0-9]*|[0-9]*) printf '%s\n' "$WM_JV" ;;
+      *) return 1 ;;   # null, objects, junk: print nothing
+    esac
   fi
 }
 
@@ -282,7 +352,7 @@ wm_json_escape() {
 }
 
 # ----------------------------------------------------------------- emit ----
-# Hook output goes through cat when available (EPIPE-safe), else plain printf.
+# Hook output goes through cat when available (EPIPE on Git Bash, superpowers #1612); kept on purpose.
 wm__out() {
   if command -v cat >/dev/null 2>&1; then printf '%s\n' "$1" | cat; else printf '%s\n' "$1"; fi
 }
@@ -306,21 +376,37 @@ wm_emit_deny() {
 # ---------------------------------------------------------------- locks ----
 # wm_lock <name>: mkdir lock, 50 x 0.1s retries, stale after 30s. rc 1 on give-up.
 wm_lock() {
-  local layer d i mt now
+  local layer d i mt now st
   layer="$(wm_layer_root)" || return 1
   mkdir -p "$layer/.locks" 2>/dev/null || return 1
   d="$layer/.locks/$1"
   for i in $(seq 1 50); do
     if mkdir "$d" 2>/dev/null; then return 0; fi
-    mt="$(stat -c %Y "$d" 2>/dev/null || stat -f %m "$d" 2>/dev/null)"
+    mt="$(wm__mtime "$d")"
     if [ -n "$mt" ]; then
       now="$(wm__epoch)"
-      if [ $((now - mt)) -gt 30 ]; then rmdir "$d" 2>/dev/null || rm -rf "$d" 2>/dev/null; continue; fi
+      if [ $((now - mt)) -gt 30 ]; then
+        # Steal atomically: rename (only one racer wins), re-check what we
+        # actually moved, never treat removal as acquisition; loop to mkdir.
+        st="$d.stale.$RANDOM$RANDOM"
+        if mv "$d" "$st" 2>/dev/null; then
+          mt="$(wm__mtime "$st")"
+          if [ -n "$mt" ] && [ $((now - mt)) -le 30 ]; then
+            # raced: we moved a lock someone just took; put it back if we can
+            mv "$st" "$d" 2>/dev/null || rm -rf "$st" 2>/dev/null
+          else
+            rm -rf "$st" 2>/dev/null
+          fi
+        fi
+        continue
+      fi
     fi
     sleep 0.1
   done
   return 1
 }
+
+wm__mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 
 wm_unlock() {
   local layer
@@ -336,6 +422,7 @@ wm_commit() {
   layer="$(wm_layer_root)" || return 1
   [ -n "$(git -C "$layer" status --porcelain 2>/dev/null)" ] || return 0
   log="$layer/active/.scan-failed.log"
+  # TODO(Task 3): scan is skipped (treated as passing) until bin/waymark exists.
   if [ -f "$layer/bin/waymark" ]; then
     mkdir -p "$layer/active" 2>/dev/null
     if ! (cd "$layer" && bash "$layer/bin/waymark" scan) > "$log" 2>&1; then
