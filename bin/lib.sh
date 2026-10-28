@@ -439,7 +439,9 @@ wm_commit() {
       rm -f "$log"
       return 0
     fi
-    [ -e "$layer/.git/index.lock" ] || return 3
+    # a concurrent commit may already have taken our changes
+    [ -n "$(git -C "$layer" status --porcelain 2>/dev/null)" ] || { rm -f "$log"; return 0; }
+    if [ ! -e "$layer/.git/index.lock" ] && [ "$try" -ge 2 ]; then return 3; fi
     [ "$try" -lt 5 ] && sleep 0.2
   done
   return 3
