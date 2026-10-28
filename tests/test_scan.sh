@@ -131,13 +131,17 @@ secrets = load_secrets()
 the token: refresh-handling
 secretKey: value
 tokens: many
+PWD=/home/user/app123
 LINES
 }
 
 test_assignment_positives_quoted() {
   t_expect_hit quoted1 'password = "abcdef"'
   t_expect_hit quoted2 "client_secret: 'zzzzzz'"
-  t_expect_hit pwd 'PWD=hunter2xyz'
+  t_expect_hit passwd 'PASSWD=hunter2xyz'
+  t_expect_hit nested 'config: password: hunter2x9'
+  t_expect_hit multikey 'FOO=1 PASSWORD=hunter2xyz'
+  t_expect_hit bold '**Note:** password = hunter2x9'
 }
 
 test_findings_redacted() {
@@ -165,4 +169,22 @@ test_scanner_portable_regex() {
   bs="$(printf '\134')"
   t_eq "0" "$(grep -c "${bs}[dwb]" "$f")" "no backslash-d/w/b in scanner"
   t_eq "0" "$(grep -c ',,}' "$f")" "no bash4 case expansion"
+}
+
+test_redaction_cross_pattern() {
+  local layer="$WM_SANDBOX_DIR/layer-cross" out log s
+  local a='hunter2x9' b='sk-abcdefghijklmnopqrstuvwxyz0123456789'
+  t_scan_layer "$layer"
+  printf '%s\n' "password = $a $b" > "$layer/docs/canary.md"
+  out="$(bash "$layer/bin/waymark" scan --root "$layer" 2>&1)"
+  t_contains "$out" "[secret assignment]" "assignment finding"
+  t_contains "$out" "[sk key]" "sk finding"
+  git -C "$layer" init -q -b main 2>/dev/null || git -C "$layer" init -q
+  printf 'active/\n' > "$layer/.gitignore"
+  ( . "$WM_PLUGIN/bin/lib.sh"; export WAYMARK_ROOT="$layer"; wm_commit "x" ) >/dev/null 2>&1
+  log="$(cat "$layer/active/.scan-failed.log" 2>/dev/null)"
+  for s in "$a" "$b"; do
+    t_not_contains "$out" "$s" "stdout hides $s"
+    t_not_contains "$log" "$s" "log hides $s"
+  done
 }
