@@ -117,3 +117,44 @@ test_index_summary_pipe_escaped() {
   idx="$(cat "$L/docs/INDEX.md")"
   t_contains "$idx" '| Pipe | plan | 2026-01-01 | a \| b | [p.md](p.md) |' "pipe escaped"
 }
+
+test_index_nested_archive_excluded() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" out idx
+  t_idx_layer "$L"
+  t_idx_doc "$L" "sub dir/archive/n.md" 0 'title: Nested' 'repo: app' 'kind: plan' 'created: 2026-01-01' 'status: done'
+  t_idx_doc "$L" "sub dir/keep.md" 0 'title: Keep' 'repo: app' 'kind: plan' 'created: 2026-01-01' 'status: done'
+  out="$(t_idx_run "$L")"
+  t_contains "$out" "(1 indexed, 0 incomplete, 0 expired)." "counts"
+  idx="$(cat "$L/docs/INDEX.md")"
+  t_not_contains "$idx" "Nested" "nested archive excluded"
+  t_contains "$idx" "[sub dir/keep.md](sub%20dir/keep.md)" "space encoded"
+}
+
+test_index_fence_trailing_space() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" out
+  t_idx_layer "$L"
+  printf -- '---  \ntitle: Sp\nrepo: app\nkind: plan\ncreated: 2026-01-01\nstatus: done\n--- \nbody\n' > "$L/docs/s.md"
+  out="$(t_idx_run "$L")"
+  t_contains "$out" "(1 indexed, 0 incomplete, 0 expired)." "trailing space fence"
+}
+
+test_index_bom_frontmatter() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" out
+  t_idx_layer "$L"
+  printf '\357\273\277---\ntitle: Bom\nrepo: app\nkind: plan\ncreated: 2026-01-01\nstatus: done\n---\nbody\n' > "$L/docs/b.md"
+  out="$(t_idx_run "$L")"
+  t_contains "$out" "(1 indexed, 0 incomplete, 0 expired)." "bom frontmatter"
+}
+
+test_index_link_paren_encoded() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" idx
+  t_idx_layer "$L"
+  t_idx_doc "$L" "a(b)%c.md" 0 'title: P' 'repo: app' 'kind: plan' 'created: 2026-01-01' 'status: done'
+  t_idx_run "$L" >/dev/null
+  idx="$(cat "$L/docs/INDEX.md")"
+  t_contains "$idx" "(a%28b%29%25c.md)" "link target encoded"
+}

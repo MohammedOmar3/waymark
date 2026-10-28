@@ -45,8 +45,10 @@ BEGIN {
   while ((getline line < f) > 0) {
     sub(/\r$/, "", line)
     n++
-    if (n == 1) { if (line == "---") continue; else break }
-    if (line == "---") { ok = 1; break }
+    if (n == 1 && substr(line, 1, 3) == "\357\273\277") line = substr(line, 4)
+    t2 = line; sub(/[ \t]+$/, "", t2)
+    if (n == 1) { if (t2 == "---") continue; else break }
+    if (t2 == "---") { ok = 1; break }
     if (match(line, /^[A-Za-z_]+:/)) {
       k = substr(line, 1, RLENGTH - 1)
       if (!(k in fm)) fm[k] = clean(substr(line, RLENGTH + 1))
@@ -71,7 +73,7 @@ BEGIN {
 # Pass 2: render the sorted records.
 wm_ix_render='
 function esc(s) { gsub(/\|/, "\\|", s); return s }
-function enc(s) { gsub(/ /, "%20", s); return s }
+function enc(s) { gsub(/%/, "%25", s); gsub(/ /, "%20", s); gsub(/[(]/, "%28", s); gsub(/[)]/, "%29", s); return s }
 BEGIN {
   FS = "\t"
   print "---"; print "title: Docs Index"; print "status: generated"; print "---"; print ""
@@ -99,7 +101,7 @@ END {
   }
 }'
 
-wm_ix_recs="$(find . \( -path ./archive -o -path ./INDEX.md \) -prune -o -type f -name '*.md' -print 2>/dev/null |
+wm_ix_recs="$(find . \( -name archive -o -path ./INDEX.md \) -prune -o -type f -name '*.md' -print 2>/dev/null |
   LC_ALL=C sort | sed 's|^\./||' |
   LC_ALL=C WM_TODAY="$(wm_today)" awk "$wm_ix_scan" |
   LC_ALL=C sort -t "$(printf '\t')" -k1,1 -k2,2 -k3,3 -k4,4 -k5,5r -k6,6 -k10,10)"
