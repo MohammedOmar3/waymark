@@ -12,8 +12,8 @@ test_init_creates_tree() {
   t_init "$r" --repo-roots "/a,/b" --email-allowlist "x@example.org" >/dev/null 2>&1
   for p in .gitignore layer.conf tags.conf PROTOCOL.md DOCS-PROTOCOL.md INDEX.md gotchas.md \
     decisions.md conventions.md worklog.md platform.md pipelines.md playbooks/.gitkeep \
-    repos/_template.md stats/recall.tsv inbox/.gitkeep active/.gitkeep docs/INDEX.md \
-    docs/archive/.gitkeep docs/cross-repo/.gitkeep bin/waymark bin/lib.sh bin/cmd/scan.sh; do
+    repos/_template.md stats/recall.tsv active/.gitkeep docs/INDEX.md \
+    inbox .locks docs/archive/.gitkeep docs/cross-repo/.gitkeep bin/waymark bin/lib.sh bin/cmd/scan.sh; do
     t_file_exists "$r/$p" "tree: $p"
   done
   . "$WM_PLUGIN/bin/lib.sh"
@@ -115,4 +115,31 @@ test_core_protocol_scans_clean() {
   bash "$r/bin/waymark" scan --root "$r" >/dev/null 2>&1
   t_eq 0 "$?" "PROTOCOL.core.md scans clean"
   t_eq "true" "$([ "$(wc -l < "$WM_PLUGIN/templates/PROTOCOL.core.md")" -le 25 ] && echo true)" "core <= 25 lines"
+}
+
+test_init_failure_cleans_up() {
+  local r="$WM_SANDBOX_DIR/layer" real shim="$WM_SANDBOX_DIR/shim"
+  real="$(command -v git)"
+  mkdir -p "$shim"
+  printf '#!/bin/sh\ncase "$*" in *" commit "*) exit 1 ;; esac\nexec "%s" "$@"\n' "$real" > "$shim/git"
+  chmod +x "$shim/git"
+  PATH="$shim:$PATH" t_init "$r" >/dev/null 2>&1
+  t_eq 3 "$?" "failed commit exits 3"
+  [ ! -e "$r" ]; t_eq 0 "$?" "created root removed"
+  [ ! -e "$CLAUDE_CONFIG_DIR/waymark.conf" ]; t_eq 0 "$?" "no waymark.conf"
+  mkdir -p "$r"
+  PATH="$shim:$PATH" t_init "$r" >/dev/null 2>&1
+  t_eq 3 "$?" "failed commit exits 3 (empty pre-existing root)"
+  t_eq "" "$(ls -A "$r")" "pre-existing root emptied"
+  t_init "$r" >/dev/null 2>&1
+  t_eq 0 "$?" "rerun succeeds"
+}
+
+test_init_ampersand_name() {
+  local r="$WM_SANDBOX_DIR/layer"
+  bash "$WM_PLUGIN/bin/waymark" init --owner-name 'A & B' --owner-email "owner@example.org" \
+    --root "$r" --plugin-root "$WM_PLUGIN" >/dev/null 2>&1
+  t_eq 0 "$?" "init with ampersand"
+  . "$WM_PLUGIN/bin/lib.sh"
+  t_eq 'A & B' "$(wm_conf_get "$r/layer.conf" owner_name)" "owner_name keeps &"
 }

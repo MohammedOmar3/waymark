@@ -65,63 +65,83 @@ wm_i_gpg_global="$(git config --global --get commit.gpgsign 2>/dev/null)"
 [ -n "$wm_i_sign" ] || wm_i_sign="no"
 
 # ----------------------------------------------------------------- create
+wm_i_preexisting=0
+[ -d "$wm_i_root" ] && wm_i_preexisting=1
 mkdir -p "$wm_i_root" || wm_i_die "cannot create $wm_i_root"
 wm_i_root="$(cd "$wm_i_root" && pwd)"
-cp -R "$wm_i_plugin/templates/layer/." "$wm_i_root/" || wm_i_die "copy failed"
+
+# From here on, any failure removes what init created (the root is empty or
+# was created by us, so its contents are all ours) and exits non-zero.
+wm_i_abort() {
+  trap - EXIT
+  if [ -n "$wm_i_root" ] && [ -d "$wm_i_root" ]; then
+    find "$wm_i_root" -mindepth 1 -delete 2>/dev/null || rm -rf "$wm_i_root"/* "$wm_i_root"/.[!.]* 2>/dev/null
+    [ "$wm_i_preexisting" = 1 ] || rmdir "$wm_i_root" 2>/dev/null
+  fi
+  wm_i_die "$1; nothing left behind" "${2:-3}"
+}
+
+cp -R "$wm_i_plugin/templates/layer/." "$wm_i_root/" || wm_i_abort "copy failed"
 rm -rf "$wm_i_root/bin"
-cp -R "$wm_i_plugin/bin" "$wm_i_root/bin" || wm_i_die "copy of bin failed"
+cp -R "$wm_i_plugin/bin" "$wm_i_root/bin" || wm_i_abort "copy of bin failed"
+mkdir -p "$wm_i_root/inbox" "$wm_i_root/active" "$wm_i_root/.locks" || wm_i_abort "cannot create runtime dirs"
 
 # substitute tokens (parameter expansion: values may contain any character)
+shopt -u patsub_replacement 2>/dev/null
 wm_i_created="$(wm_today)"
 wm_i_o="{"; wm_i_o="$wm_i_o$wm_i_o"
-for wm_i_f in $(cd "$wm_i_root" && grep -rl "$wm_i_o" . --exclude-dir=.git --exclude-dir=bin 2>/dev/null); do
+while IFS= read -r wm_i_f; do
+  [ -n "$wm_i_f" ] || continue
   wm_i_c="$(cat "$wm_i_root/$wm_i_f"; printf x)"; wm_i_c="${wm_i_c%x}"
   wm_i_c="${wm_i_c//"${wm_i_o}OWNER_NAME}}"/$wm_i_name}"
   wm_i_c="${wm_i_c//"${wm_i_o}OWNER_EMAIL}}"/$wm_i_email}"
   wm_i_c="${wm_i_c//"${wm_i_o}CREATED}}"/$wm_i_created}"
-  printf '%s' "$wm_i_c" > "$wm_i_root/$wm_i_f"
-done
+  printf '%s' "$wm_i_c" > "$wm_i_root/$wm_i_f" || wm_i_abort "token substitution failed"
+done <<EOT
+$(cd "$wm_i_root" && grep -rl "$wm_i_o" . --exclude-dir=.git --exclude-dir=bin 2>/dev/null)
+EOT
 
 wm_i_ver="0.1.0"
 if [ -f "$wm_i_plugin/.claude-plugin/plugin.json" ]; then
   wm_i_v="$(wm_json_str "$(cat "$wm_i_plugin/.claude-plugin/plugin.json")" version 2>/dev/null)"
   [ -z "$wm_i_v" ] || wm_i_ver="$wm_i_v"
 fi
-wm_conf_set "$wm_i_root/layer.conf" email_allowlist "$wm_i_allow"
-wm_conf_set "$wm_i_root/layer.conf" repo_roots "$wm_i_repo_roots"
-wm_conf_set "$wm_i_root/layer.conf" plugin_version "$wm_i_ver"
-wm_conf_set "$wm_i_root/layer.conf" replace_auto_memory "$wm_i_replace"
+{
+  wm_conf_set "$wm_i_root/layer.conf" email_allowlist "$wm_i_allow" &&
+  wm_conf_set "$wm_i_root/layer.conf" repo_roots "$wm_i_repo_roots" &&
+  wm_conf_set "$wm_i_root/layer.conf" plugin_version "$wm_i_ver" &&
+  wm_conf_set "$wm_i_root/layer.conf" replace_auto_memory "$wm_i_replace"
+} || wm_i_abort "cannot write layer.conf"
 
 # -------------------------------------------------------------------- git
-git -C "$wm_i_root" init -q || wm_i_die "git init failed" 3
-git -C "$wm_i_root" symbolic-ref HEAD refs/heads/main
-git -C "$wm_i_root" config user.name "$wm_i_name"
-git -C "$wm_i_root" config user.email "$wm_i_email"
-mkdir -p "$wm_i_root/.git/hooks"
-cp "$wm_i_plugin/templates/pre-commit" "$wm_i_root/.git/hooks/pre-commit"
-chmod +x "$wm_i_root/.git/hooks/pre-commit"
-wm_i_notice=""
+git -C "$wm_i_root" init -q || wm_i_abort "git init failed"
+git -C "$wm_i_root" symbolic-ref HEAD refs/heads/main || wm_i_abort "cannot set branch main"
+git -C "$wm_i_root" config user.name "$wm_i_name" || wm_i_abort "cannot set git user.name"
+git -C "$wm_i_root" config user.email "$wm_i_email" || wm_i_abort "cannot set git user.email"
+mkdir -p "$wm_i_root/.git/hooks" &&
+  cp "$wm_i_plugin/templates/pre-commit" "$wm_i_root/.git/hooks/pre-commit" &&
+  chmod +x "$wm_i_root/.git/hooks/pre-commit" || wm_i_abort "cannot install pre-commit hook"
 if [ "$wm_i_gpg_global" = "true" ] && [ "$wm_i_sign" != "yes" ]; then
-  git -C "$wm_i_root" config commit.gpgsign false
-  wm_i_notice="commit signing is on globally; set commit.gpgsign=false for this layer only (use --sign-layer yes to sign)"
-  printf 'waymark init: notice: %s\n' "$wm_i_notice"
+  git -C "$wm_i_root" config commit.gpgsign false || wm_i_abort "cannot set commit.gpgsign"
+  printf 'waymark init: notice: commit signing is on globally; set commit.gpgsign=false for this layer only (use --sign-layer yes to sign)\n'
 fi
 
 # ------------------------------------------------------------ index+commit
 export WAYMARK_ROOT="$wm_i_root"
 if [ -f "$wm_i_root/bin/cmd/index.sh" ]; then
-  bash "$wm_i_root/bin/waymark" index >/dev/null 2>&1 || true
+  wm_i_iout="$(bash "$wm_i_root/bin/waymark" index 2>&1)" ||
+    { printf '%s\n' "$wm_i_iout" >&2; wm_i_abort "waymark index failed"; }
 fi
 wm_commit "chore: initialise waymark layer"
 wm_i_crc=$?
 if [ "$wm_i_crc" != 0 ]; then
   [ ! -f "$wm_i_root/active/.scan-failed.log" ] || cat "$wm_i_root/active/.scan-failed.log" >&2
-  wm_i_die "initial commit failed (code $wm_i_crc); layer left at $wm_i_root" 3
+  wm_i_abort "initial commit failed (code $wm_i_crc)"
 fi
 
 # ------------------------------------------------------------ pointer file
-mkdir -p "$(wm_config_home)"
-wm_conf_set "$(wm_config_home)/waymark.conf" root "$wm_i_root"
+{ mkdir -p "$(wm_config_home)" && wm_conf_set "$(wm_config_home)/waymark.conf" root "$wm_i_root"; } ||
+  wm_i_abort "cannot write waymark.conf"
 
 # ------------------------------------------------------------------ table
 wm_i_fail=0
