@@ -58,6 +58,26 @@ test_stop_blocks_once() {
   t_contains "$(wm_json_str "$out" reason)" 'Triage 1 waymark candidate(s) before finishing: I-abcdef12-4.' "new arrival blocks again"
 }
 
+test_stop_terminal_and_gated_only_silent() {
+  t_gate_setup
+  t_gate_cand "$INBOX" abcdef12 1 dismissed
+  t_gate_cand "$INBOX" abcdef12 2 "recorded G-0001"
+  t_gate_cand "$INBOX" abcdef12 3 deferred
+  t_gate_cand "$INBOX" abcdef12 4 gated
+  t_eq "" "$(t_stop)" "silent via pre-scan"
+  t_contains "$(<"$INBOX")" '## I-abcdef12-4 — gated' "left untouched"
+}
+
+test_stop_flip_tolerates_trailing_space() {
+  local out
+  t_gate_setup
+  printf '## I-abcdef12-1 — new \n- repo: alpha\n\n```\nboom\n```\n\n' > "$INBOX"
+  out="$(t_stop)"
+  t_contains "$(wm_json_str "$out" reason)" 'Triage 1 waymark candidate(s) before finishing: I-abcdef12-1.' "blocks"
+  t_contains "$(<"$INBOX")" '## I-abcdef12-1 — gated' "flipped despite trailing space"
+  t_eq "" "$(t_stop)" "then silent"
+}
+
 test_stop_hook_active_never_blocks() {
   local out
   t_gate_setup

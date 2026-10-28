@@ -20,7 +20,7 @@ st_plugin="${st_dir%/*}"
 wm_hook_guard Stop
 
 st_main() {
-  local head layer id8 quick file rows line id st ids="" n=0 flip="" tmp locked=0 oldifs
+  local head layer id8 quick file rows line id st ids="" n=0 flip="" tmp locked=0 oldifs content
   local h_session_id h_stop_hook_active h__missing
 
   wm__layer_find || return 0
@@ -43,6 +43,13 @@ st_main() {
   [ -n "$id8" ] || return 0
   file="$layer/inbox/$id8.md"
   [ -s "$file" ] || return 0
+  # builtin pre-scan: only terminal candidates (dismissed/recorded/deferred/gated) means nothing to do
+  content="$(<"$file")"
+  case "$content" in
+    *'— new'*|*'— mandatory'*) ;;
+    *) return 0 ;;
+  esac
+  content=""
 
   wm_tri_cmd=__lib
   . "$st_plugin/bin/cmd/triage.sh" 2>/dev/null || return 0
@@ -74,7 +81,7 @@ st_main() {
       r = substr($0, 4); sp = index(r, " "); id = (sp ? substr(r, 1, sp - 1) : r)
       rest = (sp ? substr(r, sp + 1) : ""); c = ""
       if (rest ~ /\r$/) { c = cr; sub(/\r$/, "", rest) }
-      if (rest ~ /— new$/ && index(ENVIRON["WM_IDS"], " " id " ") > 0) { print "## " id " — gated" c; next }
+      if (rest ~ /— new[ \t]*$/ && index(ENVIRON["WM_IDS"], " " id " ") > 0) { print "## " id " — gated" c; next }
     }
     { print }' "$file" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
     rm -f "$tmp" 2>/dev/null
