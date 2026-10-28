@@ -10,11 +10,16 @@ test_sandbox_isolated() {
 }
 
 test_hook_json_raw_values() {
+  . "$WM_PLUGIN/bin/lib.sh"
   local j; j="$(t_hook_json Stop 'stop_hook_active:=true' 'n:=3' 'x:=null' 'tool_input.command=echo "a\b"
 z' 'tool_input.flag:=false' 'note=a=b')"
-  local out
-  out="$(printf '%s' "$j" | python -c 'import sys,json;d=json.load(sys.stdin);print(d["stop_hook_active"] is True, d["n"]==3, d["x"] is None, d["tool_input"]["flag"] is False, d["note"], repr(d["tool_input"]["command"]))' 2>&1)"
-  t_eq 'True True True True a=b '"'"'echo "a\\b"\nz'"'" "$out" "hook_json raw and string values valid"
+  t_eq true "$(wm_json_bool "$j" stop_hook_active)" "hook_json raw bool"
+  t_eq 3 "$(wm_json_num "$j" n)" "hook_json raw number"
+  t_exit 1 "hook_json raw null is not a string" -- wm_json_str "$j" x
+  t_eq false "$(wm_json_bool "$j" tool_input.flag)" "hook_json nested raw bool"
+  t_eq 'a=b' "$(wm_json_str "$j" note)" "hook_json string with ="
+  t_eq 'echo "a\b"
+z' "$(wm_json_str "$j" tool_input.command)" "hook_json nested string escapes"
 }
 
 test_runner_fails_on_broken_or_empty() {
