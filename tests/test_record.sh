@@ -84,8 +84,8 @@ test_record_concurrent_ids() {
   local a b
   t_rec_setup
   t_rec_gotcha >/dev/null  # G-0001 baseline
-  (t_rec_gotcha > "$WM_SANDBOX_DIR/o1" 2>&1) &
-  (t_rec_gotcha > "$WM_SANDBOX_DIR/o2" 2>&1) &
+  (WAYMARK_TEST_ID_DELAY=0.5 t_rec_gotcha > "$WM_SANDBOX_DIR/o1" 2>&1) &
+  (WAYMARK_TEST_ID_DELAY=0.5 t_rec_gotcha > "$WM_SANDBOX_DIR/o2" 2>&1) &
   wait
   a="$(cat "$WM_SANDBOX_DIR/o1")"; b="$(cat "$WM_SANDBOX_DIR/o2")"
   t_eq "G-0002 G-0003" "$(printf '%s\n%s\n' "$a" "$b" | sort | tr '\n' ' ' | sed 's/ $//')" "distinct ids"
@@ -192,6 +192,45 @@ test_record_retro_and_convention() {
 - **Rule:** Use tabs
 - **Because:** house style" "convention block"
   t_eq "memory: C-0001 Use tabs" "$(git -C "$L" log -1 --format=%s)" "convention commit"
+}
+
+test_record_value_safety() {
+  local sym fix id2
+  t_rec_setup
+  sym='pipe | dash — home $HOME nl \n bs \\ end \t مرحبا'
+  fix='fix `x` | "q" — $(echo no) \\server\share \n مرحبا'
+  wm record gotcha --symptom "$sym" --cause c --fix "$fix" --match m >/dev/null
+  t_eq 0 "$?" "record ok"
+  t_eq 1 "$(grep -c -x -F -e "- **Symptom:** $sym" "$L/gotchas.md")" "symptom byte-identical"
+  t_eq 1 "$(grep -c -x -F -e "- **Fix:** $fix" "$L/gotchas.md")" "fix byte-identical"
+  id2="$(t_rec_gotcha)"
+  t_eq "G-0002" "$id2" "next id after odd values"
+}
+
+test_record_utf8_truncation() {
+  local sym="" i subj
+  t_rec_setup
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do sym="${sym}مرحبا"; done
+  wm record gotcha --symptom "$sym" --cause c --fix f --match m >/dev/null
+  t_eq 0 "$?" "record ok"
+  subj="$(git -C "$L" log -1 --format=%s)"
+  t_contains "$subj" "memory: G-0001 " "subject prefix"
+  if command -v iconv >/dev/null 2>&1; then
+    printf '%s' "$subj" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+    t_eq 0 "$?" "subject valid utf-8"
+    grep '^## G-0001 ' "$L/gotchas.md" | iconv -f UTF-8 -t UTF-8 >/dev/null 2>&1
+    t_eq 0 "$?" "heading valid utf-8"
+  fi
+}
+
+test_handoff_preserves_crlf() {
+  local f="$WM_SANDBOX_DIR/layer/active/myapp--abcd1234.md"
+  t_rec_setup
+  printf 'repo: myapp\r\nhandoff: old\r\nstatus: x\r\n' > "$f"
+  wm handoff "new text" --session abcd1234 >/dev/null
+  # grep/awk text-mode on Git Bash hides CR, so count raw bytes with tr
+  t_eq 3 "$(tr -cd '\r' < "$f" | wc -c | tr -d ' ')" "crlf kept on all lines"
+  t_eq "handoff: new text" "$(tr -d '\r' < "$f" | grep '^handoff:')" "text replaced"
 }
 
 test_commit_command() {

@@ -93,9 +93,16 @@ fi
 wm_rec_field() {
   if [ -n "$2" ]; then printf -- '- **%s:** %s\n' "$1" "$2"; else printf -- '- **%s:**\n' "$1"; fi
 }
-wm_rec_short() { # <text> -> WM_S (<= 70 chars)
-  WM_S="$1"
-  [ "${#WM_S}" -le 70 ] || WM_S="${WM_S:0:67}..."
+wm_rec_short() { # <text> -> WM_S (<= 70 bytes, never ends inside a UTF-8 character)
+  local LC_ALL=C s="$1" n=67
+  if [ "${#s}" -le 70 ]; then WM_S="$s"; return 0; fi
+  while [ "$n" -gt 0 ]; do
+    case "${s:n:1}" in
+      [$'\200'-$'\277']) n=$((n - 1)) ;;
+      *) break ;;
+    esac
+  done
+  WM_S="${s:0:n}..."
 }
 
 case "$wm_rec_kind" in
@@ -110,6 +117,7 @@ wm_rec_n="$(awk -v p="## $wm_rec_pfx-" '
   { sub(/\r$/, "") }
   substr($0, 1, length(p)) == p && $0 ~ /^## [A-Z]-[0-9]+/ { r = substr($0, 4); sub(/^[A-Z]-/, "", r); n = r + 0; if (n > m) m = n }
   END { print m + 0 }' "$wm_rec_file")"
+[ -z "${WAYMARK_TEST_ID_DELAY:-}" ] || sleep "$WAYMARK_TEST_ID_DELAY"   # test hook: widen the race window
 wm_rec_id="$(printf '%s-%04d' "$wm_rec_pfx" $((wm_rec_n + 1)))"
 case "$wm_rec_kind" in
   gotcha) wm_rec_short "$wm_rec_symptom"; wm_rec_head="## $wm_rec_id — $WM_S" ;;

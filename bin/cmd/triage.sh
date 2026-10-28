@@ -73,7 +73,7 @@ wm_tri_set_state() {
   wm_tri_cand_file "$layer" "$id"
   wm_lock inbox || wm_tri_die "could not take inbox lock" 3
   tmp="$WM_CF.tmp.$$"
-  WM_ID="$id" WM_ST="$state" awk '
+  WM_ID="$id" WM_ST="$state" awk -v BINMODE=3 '
   BEGIN { p = "## " ENVIRON["WM_ID"] " "; cr = sprintf("%c", 13) }
   substr($0, 1, length(p)) == p && !done {
     c = ($0 ~ /\r$/) ? cr : ""
@@ -102,7 +102,7 @@ wm_tri_status() {
   [ -f "$file" ] || wm_tri_die "unknown id: $id"
   wm_lock ids || wm_tri_die "could not take ids lock" 3
   tmp="$file.tmp.$$"
-  WM_ID="$id" WM_ST="$st" awk '
+  WM_ID="$id" WM_ST="$st" awk -v BINMODE=3 '
   BEGIN { p = "## " ENVIRON["WM_ID"] " "; cr = sprintf("%c", 13) }
   {
     line = $0; sub(/\r$/, "", line)
@@ -184,9 +184,13 @@ wm_tri_handoff() {
   [ -n "$f" ] || wm_tri_die "no active file for session $ses"
   wm_lock "active-$ses" || wm_tri_die "could not take active lock" 3
   tmp="$f.tmp.$$"
-  WM_TXT="$text" awk '
+  WM_TXT="$text" awk -v BINMODE=3 '
+  BEGIN { cr = sprintf("%c", 13) }
   { line = $0; sub(/\r$/, "", line) }
-  substr(line, 1, 8) == "handoff:" && !done { print "handoff: " ENVIRON["WM_TXT"]; done = 1; next }
+  substr(line, 1, 8) == "handoff:" && !done {
+    c = ($0 ~ /\r$/) ? cr : ""
+    print "handoff: " ENVIRON["WM_TXT"] c; done = 1; next
+  }
   { print }
   END { if (!done) print "handoff: " ENVIRON["WM_TXT"] }' "$f" > "$tmp" && mv -f "$tmp" "$f"
   rc=$?
