@@ -113,3 +113,56 @@ test_precommit_blocks() {
   git -C "$layer" commit -q -m good >/dev/null 2>&1
   t_eq 0 "$?" "clean commit succeeds"
 }
+
+test_assignment_false_positives() {
+  local layer="$WM_SANDBOX_DIR/layer-fp" line rc n=0
+  t_scan_layer "$layer"
+  while IFS= read -r line; do
+    n=$((n+1))
+    t_plant "$layer" "$line"
+    bash "$layer/bin/waymark" scan --root "$layer" >/dev/null 2>&1; rc=$?
+    t_eq 0 "$rc" "not flagged: $line"
+  done <<'LINES'
+password = os.environ["PW"]
+const token = getToken();
+token: required
+Secret: management
+secrets = load_secrets()
+the token: refresh-handling
+secretKey: value
+tokens: many
+LINES
+}
+
+test_assignment_positives_quoted() {
+  t_expect_hit quoted1 'password = "abcdef"'
+  t_expect_hit quoted2 "client_secret: 'zzzzzz'"
+  t_expect_hit pwd 'PWD=hunter2xyz'
+}
+
+test_findings_redacted() {
+  local layer="$WM_SANDBOX_DIR/layer-red" out
+  local secrets=('hunter2x9' 'abcdefghijklmnopqrstuvwxyz0123456789' 'AKIAABCDEFGHIJKLMNOP' 'user:pass9word@')
+  t_scan_layer "$layer"
+  printf '%s\n' 'password = hunter2x9' 'k sk-abcdefghijklmnopqrstuvwxyz0123456789 x' \
+    'id AKIAABCDEFGHIJKLMNOP end' 'postgres://user:pass9word@host/db' > "$layer/docs/canary.md"
+  out="$(bash "$layer/bin/waymark" scan --root "$layer" 2>&1)"
+  t_contains "$out" "[REDACTED]" "output redacted"
+  t_contains "$out" "canary.md:1" "location kept"
+  local s
+  for s in "${secrets[@]}"; do t_not_contains "$out" "$s" "stdout hides $s"; done
+  # log written by wm_commit
+  git -C "$layer" init -q -b main 2>/dev/null || git -C "$layer" init -q
+  printf 'active/\n' > "$layer/.gitignore"
+  ( . "$WM_PLUGIN/bin/lib.sh"; export WAYMARK_ROOT="$layer"; wm_commit "x" ) >/dev/null 2>&1
+  local log; log="$(cat "$layer/active/.scan-failed.log" 2>/dev/null)"
+  t_contains "$log" "[REDACTED]" "log redacted"
+  for s in "${secrets[@]}"; do t_not_contains "$log" "$s" "log hides $s"; done
+}
+
+test_scanner_portable_regex() {
+  local f="$WM_PLUGIN/bin/cmd/scan.sh" bs
+  bs="$(printf '\134')"
+  t_eq "0" "$(grep -c "${bs}[dwb]" "$f")" "no backslash-d/w/b in scanner"
+  t_eq "0" "$(grep -c ',,}' "$f")" "no bash4 case expansion"
+}
