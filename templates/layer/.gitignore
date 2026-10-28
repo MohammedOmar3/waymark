@@ -1,0 +1,7 @@
+active/*.md
+inbox/
+.view/
+.locks/
+*.log
+*.tmp
+*.bak
