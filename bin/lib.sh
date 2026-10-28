@@ -131,8 +131,9 @@ wm__repo_name() {
 WM__AWK='
 function jstr(   j) {
   # Real quotes were located up front (see END), so a string ends at the next
-  # one: no per-character or per-escape work, linear even for a 5 MB value
-  # (a per-character substr loop took ~2.5 s).
+  # one, with no per-character or per-escape work: linear in the input size
+  # (the quote split in END still reads the whole buffer; a per-character
+  # substr loop took ~2.5 s for 5 MB).
   while (qk <= qn && qp[qk] < i) qk++
   j = (qk + 1 <= qn) ? qp[qk + 1] : len + 1
   qk += 2
@@ -148,7 +149,7 @@ function path(n,   s, m) {
 { buf = buf $0 " " }
 END {
   buf = ENVIRON["WM_PRE"] buf
-  nul = sprintf("%c", 0); if (index(buf, nul)) gsub(nul, "", buf)   # NUL cannot survive $(...)
+  nul = sprintf("%c", 0); if (nul != "" && index(buf, nul)) gsub(nul, "", buf)   # NUL cannot survive $(...)
   len = length(buf); i = 1; d = 0
   # locate the real quotes: split on every quote, then drop those preceded by
   # an odd run of backslashes (escaped). Linear; gsub/index loops are quadratic here.

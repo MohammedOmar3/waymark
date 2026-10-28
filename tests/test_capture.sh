@@ -125,6 +125,20 @@ test_memory_write_denied_only_when_on() {
   t_eq "" "$out" "other memory dir untouched"
   out="$(t_pre_file Write "$HOME/.claude/projects/p/other.md")"
   t_eq "" "$out" "projects but not memory"
+  out="$(t_pre_file Write "$CLAUDE_CONFIG_DIR/projects/p/memory/MEMORY.md")"
+  t_contains "$out" '"permissionDecision":"deny"' "CLAUDE_CONFIG_DIR store denied"
+  out="$(t_pre_file Write "$CLAUDE_CONFIG_DIR/projects/p/other.md")"
+  t_eq "" "$out" "CLAUDE_CONFIG_DIR, non-memory path under projects allowed"
+  out="$(CLAUDE_CONFIG_DIR='C:\Users\Me\cfg' t_pre_file Write 'c:\users\me\CFG\Projects\p\Memory\MEMORY.md')"
+  t_contains "$out" '"permissionDecision":"deny"' "config dir: backslashes, drive letter and case"
+  out="$(CLAUDE_CONFIG_DIR='C:\Users\Me\cfg' t_pre_file Write '/c/Users/Me/cfg/projects/p/memory/MEMORY.md')"
+  t_contains "$out" '"permissionDecision":"deny"' "config dir C:/ vs /c/ form"
+  out="$(t_pre_file Write 'C:\Users\x\.Claude\projects\p\MEMORY\MEMORY.md')"
+  t_contains "$out" '"permissionDecision":"deny"' ".Claude / MEMORY case variants denied"
+  out="$(t_pre_file Write 'C:\Users\x\.claude\projects\p\notes.md')"
+  t_eq "" "$out" "non-memory path under .claude/projects allowed"
+  out="$(t_pre_bash 'ls')"
+  t_eq "" "$out" "Bash with no playbooks while replacing memory: silent"
 }
 
 # ------------------------------------------------------------------ post-tool
@@ -137,6 +151,12 @@ test_files_touched_dedup() {
   t_post_file Edit "$R/src/b.ts"
   t_post_file Write 'C:\other\place\c.txt'
   t_eq "files touched: src/a.ts, src/b.ts, C:/other/place/c.txt" "$(grep '^files touched:' "$ACT")" "deduplicated, repo-relative"
+  # another repo's file is not the session repo's: it stays absolute
+  t_fake_repo "$WM_SANDBOX_DIR/beta"
+  mkdir -p "$WM_SANDBOX_DIR/beta/src"
+  t_post_file Edit "$WM_SANDBOX_DIR/beta/src/a.ts"
+  t_contains "$(grep '^files touched:' "$ACT")" ", $WM_SANDBOX_DIR/beta/src/a.ts" "file in another repo stays absolute"
+  t_contains "$(grep '^files touched:' "$ACT")" "files touched: src/a.ts, " "session repo file still relative"
   t_eq "1" "$(t_count "$ACT" 'repo: alpha')" "rest of file kept"
   t_eq "1" "$(t_count "$ACT" 'handoff:')" "handoff line kept"
   rm -f "$ACT"
@@ -255,7 +275,7 @@ test_huge_output() {
   t_cap_setup
   t_cap_gotcha G-0001 open 'Unable to resolve module'
   awk 'BEGIN { printf "{\"session_id\":\"abcdef1234\",\"cwd\":\"x\",\"hook_event_name\":\"PostToolUseFailure\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"big\"},\"error\":\"Exit code 1\\nUnable to resolve module\\n"; for (i = 0; i < 61000; i++) printf "%s\\n", sprintf("%80s", "x"); printf "\",\"is_interrupt\":false,\"duration_ms\":5}\n" }' > "$f"
-  sed -i 's|"cwd":"x"|"cwd":"'"${R//\\/\\\\}"'"|' "$f"
+  awk -v r="$R" '{ sub(/"cwd":"x"/, "\"cwd\":\"" r "\""); print }' "$f" > "$f.tmp" && mv "$f.tmp" "$f"
   size="$(wc -c < "$f" | tr -d ' ')"
   [ "$size" -gt 4900000 ] && t__pass "payload is ~5 MB" || t__fail "payload is ~5 MB" "$size"
   t0="$(date +%s%N 2>/dev/null)"
@@ -272,7 +292,7 @@ test_huge_output() {
 }
 
 test_binary_output() {
-  local out
+  local out rc
   t_cap_setup
   t_cap_gotcha G-0001 open 'Unable to resolve module'
   out="$(printf '%s\n' "{\"session_id\":\"abcdef1234\",\"cwd\":\"$R\",\"hook_event_name\":\"PostToolUseFailure\",\"tool_name\":\"Bash\",\"tool_input\":{\"command\":\"cat bin\"},\"error\":\"Exit code 1\\nUnable to resolve module \\u0000\\u0001\\u001b[31m\\u007f\\ud83d done\",\"is_interrupt\":false}" | bash "$WM_PLUGIN/hooks/post-tool")"
@@ -282,8 +302,10 @@ test_binary_output() {
   t_eq "1" "$(t_count "$INBOX" '## I-*')" "captured"
   case "$(<"$INBOX")" in *$'\001'*|*$'\033'*) t__fail "no control chars in inbox" ;; *) t__pass "no control chars in inbox" ;; esac
   # raw NUL bytes in stdin must not crash either
-  printf '{"session_id":"abcdef1234","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"nul"},"error":"Exit code 1\\nab\0cd","is_interrupt":false}\n' | bash "$WM_PLUGIN/hooks/post-tool" >/dev/null 2>&1
-  t__pass "raw NUL in stdin: no crash"
+  out="$(printf '{"session_id":"abcdef1234","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"nul"},"error":"Exit code 1\\nab\0cd","is_interrupt":false}\n' | bash "$WM_PLUGIN/hooks/post-tool" 2>/dev/null)"
+  rc=$?
+  t_eq "0" "$rc" "raw NUL in stdin: exit 0"
+  case "$out" in ''|*'"hookSpecificOutput"'*) t__pass "raw NUL in stdin: empty or valid output" ;; *) t__fail "raw NUL in stdin: empty or valid output" "$out" ;; esac
 }
 
 test_unicode_command() {

@@ -78,7 +78,7 @@ On the forced continuation Stop fired again with `"stop_hook_active": true` [loc
 `reason`: `clear`, `resume`, `logout`, `prompt_input_exit`, `other` [docs]; `other` seen locally. No decision control; JSON output (e.g. `systemMessage`) is discarded. [docs] Default budget is 1.5 seconds total (applies on exit, `/clear`, `/resume`); a per-hook `timeout` raises it up to 60 s but timeouts on plugin-provided hooks do NOT raise the budget; env `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS` sets it explicitly (user-level, not available to a plugin). Waymark's SessionEnd work must finish well under 1.5 s (cheap git/file writes only; detach anything slow).
 
 ## Auto-memory setting
-[docs: https://code.claude.com/docs/en/memory] Settings key `autoMemoryEnabled` (boolean) in any settings scope: `{"autoMemoryEnabled": false}`. Env alternative: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Related: `autoMemoryDirectory` relocates the store. Not exercised locally.
+[docs: https://code.claude.com/docs/en/memory] Settings key `autoMemoryEnabled` (boolean) in any settings scope: `{"autoMemoryEnabled": false}`. Env alternative: `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`. Related: `autoMemoryDirectory` relocates the store. Not exercised locally. waymark's PreToolUse deny covers `~/.claude` and `$CLAUDE_CONFIG_DIR` (`projects/*/memory/*`, case-insensitive); a store relocated with `autoMemoryDirectory` is not covered (reading settings.json per call costs too much).
 
 ## Plugin env
 - hooks.json location [docs]: `hooks/hooks.json` in the plugin, shape `{"hooks":{"Event":[{"matcher":"...","hooks":[{"type":"command","command":"...","timeout":30}]}]}}`.

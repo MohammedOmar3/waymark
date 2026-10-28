@@ -20,17 +20,20 @@ pt_plugin="${pt_dir%/*}"
 wm_hook_guard PostToolUse
 
 
-# pt_files_touched <layer> <id8> <file_path>
+# pt_files_touched <layer> <id8> <file_path> <cwd>
 pt_files_touched() {
-  local layer="$1" id8="$2" fp="$3" act="" f root d rel line list="" item rest found=0 out="" nl=$'\n' lk
+  local layer="$1" id8="$2" fp="$3" cwd="$4" act="" f root d rel line list="" item rest found=0 out="" nl=$'\n' lk
   fp="${fp//\\//}"          # Windows separators; msys accepts C:/ paths as they are
+  cwd="${cwd//\\//}"
   [ -n "$fp" ] || return 0
   for f in "$layer"/active/*"--$id8.md"; do [ -f "$f" ] && { act="$f"; break; }; done
   [ -n "$act" ] || return 0
-  # relative to the repo root when inside it (walk up to the nearest .git)
-  d="${fp%/*}"; root=""
-  while [ -n "$d" ] && [ "$d" != "${d%/*}" ]; do
+  # Relative to the SESSION's repo root (nearest .git above cwd, lexical walk);
+  # files outside it (another repo, a submodule's parent) stay absolute.
+  d="${cwd%/}"; root=""
+  while [ -n "$d" ]; do
     if [ -e "$d/.git" ]; then root="$d"; break; fi
+    [ "$d" != "${d%/*}" ] || break
     d="${d%/*}"
   done
   rel="$fp"
@@ -73,7 +76,7 @@ pt_files_touched() {
 # compared in its JSON-escaped form (the Match is escaped the same way), so the
 # 64 KB are never unescaped.
 pt_recall() {
-  local layer="$1" id8="$2" repo="$3" ev="$4" raw="$5" nocr="" file line st m heading cause fix gid hits=0 ctx="" incom=0 nl=$'\n'
+  local layer="$1" id8="$2" repo="$3" ev="$4" raw="$5" nocr="" file line st m heading cause fix gid hit=0 hits=0 ctx="" incom=0 nl=$'\n'
   file="$layer/gotchas.md"
   [ -f "$file" ] || return 0
   case "$raw" in *'\r'*) nocr="${raw//\\r/}" ;; esac
@@ -141,11 +144,12 @@ pt_main() {
   wm__layer_find || return 0
   layer="$WM_LAYER"
 
-  # Write/Edit need only the path (early exit in the scanner, so a huge
-  # tool_input.content is never walked); everything else gets the full set.
+  # Write/Edit request only session_id, cwd and the path, so the tokenizer
+  # stops early (awk still reads and quote-splits all of stdin, which is linear;
+  # tool_input.content is never requested); everything else gets the full set.
   keys="session_id cwd hook_event_name tool_name tool_input.file_path tool_input.command error is_interrupt"
   case "$head" in
-    *'"tool_name":"Write"'*|*'"tool_name":"Edit"'*) keys="session_id tool_input.file_path" ;;
+    *'"tool_name":"Write"'*|*'"tool_name":"Edit"'*) keys="session_id cwd tool_input.file_path" ;;
   esac
   WM_PRE="$head" WM_MAXV=65536 WM_RAW="error tool_input.command" wm_json_read_stdin h $keys
 
@@ -153,13 +157,13 @@ pt_main() {
   [ -n "$id8" ] || return 0
 
   case "$keys" in
-    "session_id tool_input.file_path")
-      pt_files_touched "$layer" "$id8" "$h_tool_input_file_path"
+    "session_id cwd tool_input.file_path")
+      pt_files_touched "$layer" "$id8" "$h_tool_input_file_path" "$h_cwd"
       return 0 ;;
   esac
 
   case "$h_tool_name" in
-    Write|Edit) pt_files_touched "$layer" "$id8" "$h_tool_input_file_path"; return 0 ;;
+    Write|Edit) pt_files_touched "$layer" "$id8" "$h_tool_input_file_path" "$h_cwd"; return 0 ;;
   esac
 
   # ---- Bash failure (the single interpretation lives in lib.sh) ----
