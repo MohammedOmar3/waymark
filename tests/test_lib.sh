@@ -212,34 +212,38 @@ t_mk_git_layer() {
 test_commit_basic() {
   t_lib
   local layer="$WM_SANDBOX_DIR/layer"
-  t_mk_git_layer "$layer"; export WAYMARK_ROOT="$layer"
+  t_mk_scan_layer "$layer"; export WAYMARK_ROOT="$layer"
   t_exit 0 "no changes -> 0" -- wm_commit "noop"
-  t_eq "1" "$(git -C "$layer" rev-list --count HEAD)" "no commit made"
+  t_eq "2" "$(git -C "$layer" rev-list --count HEAD)" "no commit made"
   printf 'x\n' > "$layer/n.md"
-  wm_commit "add n"; t_eq 0 "$?" "changes committed (scan absent = pass)"
+  wm_commit "add n"; t_eq 0 "$?" "changes committed (scan passes)"
   t_eq "add n" "$(git -C "$layer" log -1 --format=%s)" "commit message"
   t_eq "" "$(git -C "$layer" status --porcelain)" "tree clean"
+}
+
+t_mk_scan_layer() {
+  t_mk_git_layer "$1"
+  cp -R "$WM_PLUGIN/bin" "$1/bin"
+  git -C "$1" add -A && git -C "$1" commit -q -m bin
 }
 
 test_commit_scan_gate() {
   t_lib
   local layer="$WM_SANDBOX_DIR/layer"
-  t_mk_git_layer "$layer"; export WAYMARK_ROOT="$layer"
-  mkdir -p "$layer/bin" "$layer/active"
-  printf '#!/usr/bin/env bash\necho "secret found"\nexit 1\n' > "$layer/bin/waymark"
-  printf 'x\n' > "$layer/n.md"
-  wm_commit "blocked"; t_eq 2 "$?" "scan failure -> 2"
-  t_contains "$(cat "$layer/active/.scan-failed.log")" "secret found" "findings logged"
-  t_eq "1" "$(git -C "$layer" rev-list --count HEAD)" "nothing committed"
-  printf '#!/usr/bin/env bash\nexit 0\n' > "$layer/bin/waymark"
-  wm_commit "ok now"; t_eq 0 "$?" "scan pass -> 0"
+  t_mk_scan_layer "$layer"; export WAYMARK_ROOT="$layer"
+  echo "password = hunter2x" > "$layer/n.md"
+  wm_commit "blocked"; t_eq 2 "$?" "planted secret -> 2"
+  t_contains "$(cat "$layer/active/.scan-failed.log")" "n.md" "findings logged"
+  t_eq "2" "$(git -C "$layer" rev-list --count HEAD)" "nothing committed"
+  echo fine > "$layer/n.md"
+  wm_commit "ok now"; t_eq 0 "$?" "clean -> 0"
   t_eq "no" "$([ -e "$layer/active/.scan-failed.log" ] && echo yes || echo no)" "scan log removed"
 }
 
 test_commit_index_lock_retry() {
   t_lib
   local layer="$WM_SANDBOX_DIR/layer"
-  t_mk_git_layer "$layer"; export WAYMARK_ROOT="$layer"
+  t_mk_scan_layer "$layer"; export WAYMARK_ROOT="$layer"
   printf 'x\n' > "$layer/n.md"
   : > "$layer/.git/index.lock"
   ( sleep 0.3; rm -f "$layer/.git/index.lock" ) &
@@ -331,4 +335,13 @@ test_lock_stale_steal_race() {
   t_eq "30" "$(cat "$ctr")" "no lost increments with 3 waiters on a stale lock"
   t_not_contains "$(cat "$f")" LOCKFAIL "no lock failures"
   t_eq "" "$(ls "$layer/.locks")" "no leftover lock or stale dirs"
+}
+
+test_commit_scanner_missing() {
+  t_lib
+  local layer="$WM_SANDBOX_DIR/layer"
+  t_mk_git_layer "$layer"; export WAYMARK_ROOT="$layer"
+  printf 'x\n' > "$layer/n.md"
+  wm_commit "no scanner"; t_eq 2 "$?" "missing scanner -> 2"
+  t_contains "$(cat "$layer/active/.scan-failed.log")" "scanner missing" "reason logged"
 }

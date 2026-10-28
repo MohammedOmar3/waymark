@@ -416,18 +416,19 @@ wm_unlock() {
 }
 
 # --------------------------------------------------------------- commit ----
-# wm_commit <message>: 0 ok/no-op, 2 scan failed, 3 git failure.
+# wm_commit <message>: 0 ok/no-op, 2 scan failed or scanner missing, 3 git failure.
 wm_commit() {
   local layer log try
   layer="$(wm_layer_root)" || return 1
   [ -n "$(git -C "$layer" status --porcelain 2>/dev/null)" ] || return 0
   log="$layer/active/.scan-failed.log"
-  # TODO(Task 3): scan is skipped (treated as passing) until bin/waymark exists.
-  if [ -f "$layer/bin/waymark" ]; then
-    mkdir -p "$layer/active" 2>/dev/null
-    if ! (cd "$layer" && bash "$layer/bin/waymark" scan) > "$log" 2>&1; then
-      return 2
-    fi
+  mkdir -p "$layer/active" 2>/dev/null
+  if [ ! -f "$layer/bin/waymark" ]; then
+    printf 'scanner missing: %s/bin/waymark\n' "$layer" > "$log"
+    return 2
+  fi
+  if ! (cd "$layer" && bash "$layer/bin/waymark" scan --root "$layer") > "$log" 2>&1; then
+    return 2
   fi
   for try in 0 1 2 3 4 5; do
     if [ -e "$layer/.git/index.lock" ]; then
