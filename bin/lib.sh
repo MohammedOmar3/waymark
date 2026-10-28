@@ -189,7 +189,7 @@ wm_repo_tags() {
 # wm__repo_tags [dir] -> WM_TG (space-separated; empty when none). Spawns one
 # awk (reads package.json directly); dedupe and sort are done in bash.
 wm__repo_tags() {
-  local dir="${1:-.}" layer names n line g tag i j
+  local IFS=' ' dir="${1:-.}" layer names n line g tag i j
   local -a arr=()
   WM_TG=""
   [ -f "$dir/package.json" ] || return 0
@@ -402,9 +402,56 @@ wm_json_escape() {
   printf '%s\n' "$WM_E"
 }
 
+# ----------------------------------------------------------- hook guard ----
+# Reusable by every hook script. Contract: a hook exits 0 and prints valid JSON
+# or nothing, whatever a sourced file (e.g. a stale layer copy of this lib) does.
+#   . "$plugin/bin/lib.sh"; wm_hook_guard <EventName>      # first thing
+#   wm_source_layer_lib "$layer" "$plugin/bin/lib.sh"      # instead of a bare `.`
+# Hooks that print set WM_HOOK_EMITTED=1 (wm__out does it); on any exit without
+# output, the EXIT trap prints a minimal context for SessionStart only (other
+# events must stay silent) and forces exit 0. WM_HOOK_ID is shown in that text.
+: "${WM_HOOK_EMITTED:=0}"
+
+
+wm_hook_guard() {
+  WM_HOOK_EVENT="$1"
+  trap wm__hook_exit EXIT
+}
+
+wm__hook_exit() {
+  if [ "$WM_HOOK_EMITTED" != 1 ] && [ "${WM_HOOK_EVENT:-}" = SessionStart ]; then
+    wm__m="{\"hookSpecificOutput\":{\"hookEventName\":\"SessionStart\",\"additionalContext\":\"waymark: session-start hit an error; session: ${WM_HOOK_ID:-unknown0}\"}}"
+    # fd 8 = stdout saved before sourcing untrusted files (an `exit` inside a
+    # redirected `.` would otherwise leave stdout pointing at /dev/null)
+    { printf '%s\n' "$wm__m" >&8; } 2>/dev/null || printf '%s\n' "$wm__m"
+  fi
+  exit 0
+}
+
+# wm_source_layer_lib <layer> <plugin-lib>: source <layer>/bin/lib.sh with all output
+# discarded, undo any set -e/-u it left behind, re-arm the guard, and fall back
+# to the plugin's own lib when the copy lacks a function hooks rely on.
+wm_source_layer_lib() {
+  local f="$1/bin/lib.sh" fn
+  [ -f "$f" ] || return 0
+  exec 8>&1
+  . "$f" >/dev/null 2>&1
+  set +eu
+  exec 8>&-
+  trap wm__hook_exit EXIT
+  for fn in wm__layer_find wm__repo_name wm__repo_tags wm__now wm_json_read_stdin wm_emit_context wm_path; do
+    if ! declare -F "$fn" >/dev/null 2>&1; then
+      . "$2" >/dev/null 2>&1
+      break
+    fi
+  done
+  return 0
+}
+
 # ----------------------------------------------------------------- emit ----
 # Hook output goes through cat when available (EPIPE on Git Bash, superpowers #1612); kept on purpose.
 wm__out() {
+  WM_HOOK_EMITTED=1
   if command -v cat >/dev/null 2>&1; then printf '%s\n' "$1" | cat; else printf '%s\n' "$1"; fi
 }
 

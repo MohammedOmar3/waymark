@@ -52,6 +52,8 @@ REM exit code.
 exit /b %ERRORLEVEL%
 CMDBLOCK
 
+# NOTE: the `: << 'CMDBLOCK'` heredoc above is the deliberate superpowers polyglot technique,
+# the one exception to the no-heredoc rule (it is the launcher, not a hook body).
 # Unix: run the named script directly
 # Splits $0 on its last / or \ (cmd passes Windows paths) instead of calling
 # dirname, and uses $BASH (bash's own absolute path, always set once bash is

@@ -185,9 +185,19 @@ test_budget() {
   for i in $(seq 1 3000); do printf 'filler line %s of a big repo file\n' "$i" >> "$L/repos/alpha.md"; done
   for i in $(seq 1 100); do t_ss_gotcha "G-$(printf %04d "$i")" open alpha "" "symptom number $i with some padding text to take space"; done
   printf 'x%.0s' $(seq 1 3000) > "$L/PROTOCOL.md"
-  t_ss_ctx
+  # every section at its cap: compact instruction, many parallel sessions, notices
+  printf 'x\n' > "$L/active/.compact-pending-abcdef12"
+  for i in $(seq 1 30); do printf 'repo: alpha\nstatus: working\n' > "$L/active/alpha--sess$(printf %04d "$i").md"; done
+  printf 'scan\n' > "$L/active/.scan-failed.log"
+  printf '## I-zzzz9999-1 — new\n- repo: alpha\n' > "$L/inbox/zzzz9999.md"
+  t_ss_ctx compact
   n="$(printf '%s' "$CTX" | LC_ALL=C wc -c)"
   [ "$n" -le 6000 ] && t__pass "context <= 6000 bytes ($n)" || t__fail "context <= 6000 bytes ($n)"
+  t_contains "$CTX" "waymark layer: '$L'" "layer identity survives"
+  t_contains "$CTX" "waymark CLI: bash '$L/bin/waymark'" "cli identity survives"
+  t_contains "$CTX" "active file: '$L/active/alpha--abcdef12.md'" "active file survives"
+  t_contains "$CTX" "waymark handoff" "compact instruction survives"
+  t_contains "$CTX" "untriaged from last session" "notices survive"
   case "$RAW" in '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}') t__pass "json envelope" ;; *) t__fail "json envelope" "$RAW" ;; esac
   case "$RAW" in *$'\n'*$'\n'*) t__fail "single line" ;; *) t__pass "single line" ;; esac
   t_contains "$CTX" "(truncated; see" "truncation marker"
@@ -232,4 +242,51 @@ test_launcher() {
   out="$(t_hook_json SessionStart session_id=abcdef1234 cwd="$R" source=startup | bash "$WM_PLUGIN/hooks/run-hook.cmd" session-start)"
   t_contains "$out" "session: abcdef12" "dispatches with stdin"
   t_contains "$(<"$WM_PLUGIN/hooks/hooks.json")" '"matcher": "Bash"' "failure event registered"
+}
+
+# t_ss_guard_case <name> <layer lib content...>: hostile layer copy of lib.sh
+t_ss_guard_case() {
+  local name="$1" raw rc
+  shift
+  t_ss_setup
+  mkdir -p "$L/bin"
+  printf '%s\n' "$@" > "$L/bin/lib.sh"
+  raw="$(t_hook_json SessionStart session_id=abcdef1234 cwd="$R" source=startup | bash "$WM_PLUGIN/hooks/session-start")"; rc=$?
+  t_eq "0" "$rc" "$name: exit 0"
+  case "$raw" in
+    '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}'|'') t__pass "$name: json or empty" ;;
+    *) t__fail "$name: json or empty" "$raw" ;;
+  esac
+  t_contains "$raw" "session: abcdef12" "$name: names the session"
+}
+
+test_guard_layer_lib_noisy() { t_ss_guard_case noisy 'echo stale-debug' 'echo err >&2'; }
+test_guard_layer_lib_set_e() { t_ss_guard_case set-e 'set -eu' 'false || true'; }
+test_guard_layer_lib_exit() { t_ss_guard_case exit3 'exit 3'; }
+test_guard_layer_lib_stale() {
+  # a stale copy lacking the new helpers falls back to the plugin lib
+  t_ss_guard_case stale 'wm_layer_root() { return 1; }'
+}
+
+test_untriaged_skips_live_sessions() {
+  t_ss_setup
+  printf 'repo: alpha\nstatus: working\n' > "$L/active/alpha--bbbb2222.md"
+  printf '%s\n' '## I-bbbb2222-1 — new' '- repo: alpha' > "$L/inbox/bbbb2222.md"
+  t_ss_ctx
+  t_not_contains "$CTX" "untriaged" "live session's candidates not counted"
+  printf '%s\n' '## I-cccc3333-1 — new' '- repo: alpha' '## I-cccc3333-2 — gated' '- repo: alpha' > "$L/inbox/cccc3333.md"
+  t_ss_ctx
+  t_contains "$CTX" "2 untriaged from last session" "ended session's candidates counted"
+}
+
+test_cwd_backslashes_and_space() {
+  local win="$WM_SANDBOX_DIR/my repo"
+  t_ss_setup
+  t_fake_repo "$win"
+  if command -v cygpath >/dev/null 2>&1; then win="$(cygpath -w "$win")"; fi
+  CWD="$win"
+  t_ss_ctx
+  t_contains "$CTX" "repo: my repo" "repo from windows-style cwd with space"
+  t_file_exists "$L/active/my repo--abcdef12.md" "active file for spaced repo"
+  unset CWD
 }

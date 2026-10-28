@@ -7,7 +7,8 @@
 
 # PATH may be empty or broken at SessionStart:startup (claude-code#43127).
 # Everything above the next line is builtin-only; then restore a sane PATH.
-PATH="${PATH:+$PATH:}/usr/bin:/bin"
+# /usr/bin:/bin go FIRST so Windows find.exe/sort.exe can never shadow the real tools.
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
 export LC_ALL=C   # byte semantics: caps below are byte caps; faster awk/glob
 
 # Plugin root from $0 (last / or \ split; no dirname, same as run-hook.cmd).
@@ -22,15 +23,9 @@ if ! . "$ss_plugin/bin/lib.sh" 2>/dev/null; then
   printf '%s\n' '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"waymark: could not load lib.sh"}}'
   exit 0
 fi
-
-ss_emitted=0
-ss_out=""
-ss_me=""
-
-# ss_add <text>: append a blank-line separated section.
-ss_add() {
-  if [ -n "$ss_out" ]; then ss_out="$ss_out"$'\n\n'"$1"; else ss_out="$1"; fi
-}
+# Guard: whatever happens below (a sourced file calling exit or set -e, an
+# unexpected failure), exit 0 with valid JSON. See wm_hook_guard in lib.sh.
+wm_hook_guard SessionStart
 
 # ss_cap <text> <max bytes> <pointer> -> SS_C (UTF-8 safe cut, marker last)
 ss_cap() {
@@ -160,8 +155,34 @@ END {
   print "I\t" inbox + 0
 }'
 
+# ss_q <path> -> SS_Q : single-quoted for pasting into a shell (spaces in paths)
+ss_q() {
+  local s="$1" sq="'"
+  SS_Q="'${s//"$sq"/"$sq\$sq$sq"}'"
+}
+
+# ss_render <name> : v_<name> = r_<name> capped to c_<name> (empty if no text)
+ss_render() {
+  local r="r_$1" p="p_$1" c="c_$1"
+  if [ -n "${!r}" ]; then ss_cap "${!r}" "${!c}" "${!p}"; printf -v "v_$1" '%s' "$SS_C"
+  else printf -v "v_$1" '%s' ""; fi
+}
+
+# ss_assemble -> SS_ALL : sections in spec order, blank-line separated
+ss_assemble() {
+  local nl=$'\n' s ses="$v_ses"
+  [ -z "$v_others" ] || ses="$ses$nl$v_others"
+  SS_ALL="$v_proto"
+  for s in "$v_compact" "$v_repo" "$v_resume" "$v_pb" "$v_gotchas" "$ses" "$v_notices"; do
+    [ -z "$s" ] || SS_ALL="$SS_ALL$nl$nl$s"
+  done
+}
+
 ss_main() {
-  local cwd id rest line name f st rep flag old k core add pb aw_h aw_p aw_g aw_i
+  local cwd id rest line name f st rep flag old k c r p live core add pb aw_h aw_p aw_g aw_i qcli qlayer tail_
+  local r_compact="" r_resume="" r_pb="" r_gotchas="" r_others="" r_notices="" p_compact="" p_resume="" p_pb="" p_gotchas="" p_others="" p_notices=""
+  local c_compact=0 c_resume=0 c_pb=0 c_gotchas=0 c_others=0 c_notices=0
+  local v_proto="" v_compact="" v_repo="" v_resume="" v_pb="" v_gotchas="" v_ses="" v_others="" v_notices=""
   local layer repo tags file act hand notices dirty marker
 
   wm_json_read_stdin h session_id cwd source
@@ -169,17 +190,16 @@ ss_main() {
   id="${h_session_id//[!A-Za-z0-9]/}"
   id="${id:0:8}"
   [ -n "$id" ] || id="unknown0"
-  ss_me="$id"
+  WM_HOOK_ID="$id"
   cwd="${h_cwd:-$ss_pwd}"
   case "$cwd" in *\\*|[A-Za-z]:*) cwd="$(wm_path "$cwd")" ;; esac
 
   if ! wm__layer_find; then
     wm_emit_context SessionStart 'waymark is installed but not set up; run `/waymark:setup`.'
-    ss_emitted=1
     return 0
   fi
   layer="$WM_LAYER"
-  [ -f "$layer/bin/lib.sh" ] && . "$layer/bin/lib.sh" 2>/dev/null
+  wm_source_layer_lib "$layer" "$ss_plugin/bin/lib.sh"
 
   wm__repo_name "$cwd"
   repo="${WM_RN:-none}"
@@ -234,7 +254,12 @@ ss_main() {
   pb=""
   for f in "$layer"/inbox/*.md; do
     [ -f "$f" ] || continue
-    [ "${f##*/}" = "$id.md" ] && continue
+    name="${f##*/}"; name="${name%.md}"
+    [ "$name" = "$id" ] && continue
+    # a session that still has a live active file is a parallel session, not "last session"
+    live=""
+    for rep in "$act"/*--"$name".md; do [ -f "$rep" ] && live=1; done
+    [ -z "$live" ] || continue
     [ -n "$pb" ] || { set -- "$@" mode=i; pb=1; }
     set -- "$@" "$f"
   done
@@ -252,54 +277,58 @@ ss_main() {
     done
   fi
 
-  # ---- 1. protocol, layer path, CLI path ----
+  # ---- build sections (raw text kept so oversize sections can be re-capped) ----
+  # 1. protocol (core + layer additions) with layer path and CLI path; the whole
+  #    section is capped at 2,000 bytes, the identity tail is never cut.
+  ss_q "$layer/bin/waymark"; qcli="$SS_Q"
+  ss_q "$layer"; qlayer="$SS_Q"
   ss_body "$ss_plugin/templates/PROTOCOL.core.md"; core="$SS_B"
   ss_body "$layer/PROTOCOL.md" strip-h1; add="$SS_B"
+  tail_="waymark layer: $qlayer"$'\n'"waymark CLI: bash $qcli (the \`waymark\` commands above)"
+  k=$((2000 - ${#tail_} - 2))
+  if [ "${#core}" -gt "$k" ]; then ss_cap "$core" "$k" "templates/PROTOCOL.core.md"; core="$SS_C"; add=""; fi
   if [ -n "$add" ]; then
-    ss_cap "$add" $((2000 - ${#core} - 2)) "$layer/PROTOCOL.md"
-    core="$core"$'\n\n'"$SS_C"
+    k=$((k - ${#core} - 2))
+    if [ "$k" -gt 60 ]; then ss_cap "$add" "$k" "$layer/PROTOCOL.md"; core="$core"$'\n\n'"$SS_C"; fi
   fi
-  ss_add "$core"$'\n\n'"waymark layer: $layer"$'\n'"waymark CLI: bash $layer/bin/waymark (the \`waymark\` commands above)"
+  v_proto="$core"$'\n\n'"$tail_"
 
-  # ---- compact: PreCompact cannot inject, so its marker is delivered here ----
+  # compact: PreCompact cannot inject, so its marker is delivered here
   marker="$act/.compact-pending-$id"
   if [ "${h_source:-}" = compact ] && [ -f "$marker" ]; then
-    ss_cap "Context was just compacted. Before continuing: (1) triage candidates: run \`waymark inbox --session $id\` and answer each with \`waymark record\`, \`waymark dismiss\` or \`waymark defer\`; (2) write a handoff: \`waymark handoff \"<stopped at / next step>\" --session $id\`." 500 "$marker"
-    ss_add "$SS_C"
+    r_compact="Context was just compacted. Before continuing: (1) triage candidates: run \`waymark inbox --session $id\` and answer each with \`waymark record\`, \`waymark dismiss\` or \`waymark defer\`; (2) write a handoff: \`waymark handoff \"<stopped at / next step>\" --session $id\`."
+    p_compact="$marker"; c_compact=500
     rm -f "$marker" 2>/dev/null
   fi
 
-  # ---- 2. repo and tags ----
-  line="repo: $repo"
-  [ -z "$tags" ] || line="$line"$'\n'"tags: $tags"
-  ss_cap "$line" 200 "repo"
-  ss_add "$SS_C"
+  # 2. repo and tags
+  v_repo="repo: $repo"
+  [ -z "$tags" ] || v_repo="$v_repo"$'\n'"tags: $tags"
+  ss_cap "$v_repo" 200 "repo"; v_repo="$SS_C"
 
   if [ "$repo" != none ]; then
-    # ---- 3. resume ----
+    # 3. resume
     hand="${aw_h//$'\r'/}"
     hand="${hand#"${hand%%[![:space:]]*}"}"
     hand="${hand%"${hand##*[![:space:]]}"}"
     case "$hand" in
       ''|'('*) ;;
-      *) ss_cap "Resume: $hand" 400 "$layer/repos/$repo.md"; ss_add "$SS_C" ;;
+      *) r_resume="Resume: $hand"; p_resume="$layer/repos/$repo.md"; c_resume=400 ;;
     esac
-
-    # ---- 4. playbook rules for the repo's tags (rules only) ----
+    # 4. playbook rules for the repo's tags (rules only)
     if [ -n "$aw_p" ]; then
-      ss_cap "Playbook rules (checklists arrive when a trigger command runs):"$'\n'"$aw_p" 1200 "$layer/playbooks/"
-      ss_add "$SS_C"
+      r_pb="Playbook rules (checklists arrive when a trigger command runs):"$'\n'"$aw_p"; p_pb="$layer/playbooks/"; c_pb=1200
     fi
   fi
 
-  # ---- 5. gotcha headings ----
+  # 5. gotcha headings
   if [ -n "$aw_g" ]; then
-    ss_cap "Known gotchas (headings; grep the ID in gotchas.md for detail):"$'\n'"$aw_g" 1200 "$layer/gotchas.md"
-    ss_add "$SS_C"
+    r_gotchas="Known gotchas (headings; grep the ID in gotchas.md for detail):"$'\n'"$aw_g"; p_gotchas="$layer/gotchas.md"; c_gotchas=1200
   fi
 
-  # ---- 6. own active file and other sessions ----
-  line="session: $id (pass --session $id to waymark handoff / waymark inbox)"$'\n'"active file: $file"
+  # 6. own session (identity, never cut) and other sessions
+  ss_q "$file"
+  v_ses="session: $id (pass --session $id to waymark handoff / waymark inbox)"$'\n'"active file: $SS_Q"
   rest=""
   for f in "$act"/*.md; do
     [ -f "$f" ] || continue
@@ -313,11 +342,11 @@ ss_main() {
     [ "$rep" = "$repo" ] && [ "$repo" != none ] && flag=" (same repo)"
     rest="$rest- $name ${st:-unknown}$flag"$'\n'
   done
-  [ -z "$rest" ] || line="$line"$'\n'"other active sessions:"$'\n'"${rest%$'\n'}"
-  ss_cap "$line" 600 "$act/"
-  ss_add "$SS_C"
+  if [ -n "$rest" ]; then
+    r_others="other active sessions:"$'\n'"${rest%$'\n'}"; p_others="$act/"; c_others=400
+  fi
 
-  # ---- 7. one-liners ----
+  # 7. one-liners
   notices=""
   case "$aw_i" in ''|0|*[!0-9]*) ;; *) notices="$aw_i untriaged from last session (\`waymark inbox\`)" ;; esac
   if [ -s "$act/.scan-failed.log" ]; then
@@ -327,19 +356,26 @@ ss_main() {
     dirty="$(git -C "$layer" status --porcelain 2>/dev/null)"
     [ -z "$dirty" ] || notices="${notices:+$notices$'\n'}Layer has uncommitted changes (\`waymark commit <message>\` when ready)"
   fi
-  if [ -n "$notices" ]; then
-    ss_cap "$notices" 400 "$layer"
-    ss_add "$SS_C"
-  fi
+  if [ -n "$notices" ]; then r_notices="$notices"; p_notices="$layer"; c_notices=400; fi
 
-  ss_cap "$ss_out" 6000 "$layer"
+  # ---- fit: render capped sections, then shrink the least important ones so the
+  # total stays <= 6,000 bytes without ever touching protocol/identity lines ----
+  for k in pb gotchas notices others resume compact; do ss_render "$k"; done
+  ss_assemble
+  for k in pb gotchas notices others resume compact; do
+    [ "${#SS_ALL}" -gt 6000 ] || break
+    line="v_$k"; line="${!line}"
+    [ -n "$line" ] || continue
+    c=$((${#line} - (${#SS_ALL} - 6000)))
+    if [ "$c" -lt 100 ]; then printf -v "v_$k" "%s" ""; else r="r_$k"; p="p_$k"; ss_cap "${!r}" "$c" "${!p}"; printf -v "v_$k" "%s" "$SS_C"; fi
+    ss_assemble
+  done
+
+  ss_cap "$SS_ALL" 6000 "$layer"   # defensive only; the fit above should make this a no-op
   wm_emit_context SessionStart "$SS_C"
-  ss_emitted=1
+  WM_HOOK_EMITTED=1
   return 0
 }
 
 ss_main
-if [ "$ss_emitted" != 1 ]; then
-  wm_emit_context SessionStart "waymark: session-start hit an error; session: ${ss_me:-unknown0}"
-fi
 exit 0
