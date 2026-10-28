@@ -10,7 +10,7 @@ t_se_setup() {
   L="$WM_SANDBOX_DIR/layer"; R="$WM_SANDBOX_DIR/alpha"
   mkdir -p "$L/active" "$L/inbox" "$L/stats" "$L/repos"
   printf 'repo_roots=\n' > "$L/layer.conf"
-  printf 'active/\n.locks/\n' > "$L/.gitignore"
+  printf 'active/\n.locks/\n.view/\n' > "$L/.gitignore"
   : > "$L/gotchas.md"
   cp "$WM_PLUGIN/templates/layer/worklog.md" "$L/worklog.md"
   cp "$WM_PLUGIN/templates/layer/repos/_template.md" "$L/repos/_template.md"
