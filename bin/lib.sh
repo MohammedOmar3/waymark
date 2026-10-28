@@ -129,14 +129,13 @@ wm__repo_name() {
 #                 every wanted path was found. Strings stay escaped.
 #   WM_MODE=keys: print each key of the object at any wanted path.
 WM__AWK='
-function jstr(   j, c) {
-  j = i + 1
-  while (j <= len) {
-    c = substr(buf, j, 1)
-    if (c == "\\") { j += 2; continue }
-    if (c == "\"") break
-    j++
-  }
+function jstr(   j) {
+  # Real quotes were located up front (see END), so a string ends at the next
+  # one: no per-character or per-escape work, linear even for a 5 MB value
+  # (a per-character substr loop took ~2.5 s).
+  while (qk <= qn && qp[qk] < i) qk++
+  j = (qk + 1 <= qn) ? qp[qk + 1] : len + 1
+  qk += 2
   sval = substr(buf, i + 1, j - i - 1)
   i = j + 1
 }
@@ -148,8 +147,21 @@ function path(n,   s, m) {
 }
 { buf = buf $0 " " }
 END {
+  buf = ENVIRON["WM_PRE"] buf
+  nul = sprintf("%c", 0); if (index(buf, nul)) gsub(nul, "", buf)   # NUL cannot survive $(...)
   len = length(buf); i = 1; d = 0
+  # locate the real quotes: split on every quote, then drop those preceded by
+  # an odd run of backslashes (escaped). Linear; gsub/index loops are quadratic here.
+  nq = split(buf, seg, "\""); qn = 0; pos = 0; qk = 1
+  for (m = 1; m < nq; m++) {
+    L = length(seg[m]); pos += L + 1
+    b = 0
+    while (L - b > 0 && substr(seg[m], L - b, 1) == "\\") b++
+    if (b % 2 == 0) qp[++qn] = pos
+  }
+  delete seg
   mode = ENVIRON["WM_MODE"]
+  mx = ENVIRON["WM_MAXV"] + 0
   n = split(ENVIRON["WM_K"], arr, "\n"); left = 0
   for (m = 1; m <= n; m++) if (arr[m] != "") { want[arr[m]] = 1; left++ }
   while (i <= len) {
@@ -166,7 +178,10 @@ END {
         key[d] = sval; ek[d] = 0
       } else if (mode == "val") {
         p = path(d)
-        if ((p in want) && !(p in seen)) { print p "\ts" sval; seen[p] = 1; if (--left == 0) exit }
+        if ((p in want) && !(p in seen)) {
+          if (mx > 0 && length(sval) > mx) sval = substr(sval, 1, mx)
+          pl = p "\ts" sval; print length(pl) " " pl; seen[p] = 1; if (--left == 0) exit
+        }
       }
       continue
     }
@@ -175,7 +190,7 @@ END {
     lit = substr(buf, i, j - i); i = j
     if (mode == "val") {
       p = path(d)
-      if ((p in want) && !(p in seen)) { print p "\tl" lit; seen[p] = 1; if (--left == 0) exit }
+      if ((p in want) && !(p in seen)) { pl = p "\tl" lit; print length(pl) " " pl; seen[p] = 1; if (--left == 0) exit }
     }
   }
 }'
@@ -287,7 +302,7 @@ wm__san() {
 wm__json_scan() {
   local j="$1"
   case "$j" in *$'\n'*) j="${j//$'\n'/ }" ;; esac
-  WM_JOUT="$(printf '%s' "$j" | LC_ALL=C WM_MODE=val WM_K="$2" awk "$WM__AWK")"
+  WM_JOUT="$(printf '%s' "$j" | LC_ALL=C WM_MODE=val WM_K="$2" WM_MAXV="${WM_MAXV:-}" awk "$WM__AWK")"
 }
 
 # wm_json_read <json> <prefix> <key>...
@@ -308,24 +323,32 @@ wm_json_read_stdin() {
   local prefix="$1" k keys=""
   shift
   for k in "$@"; do keys="$keys$k"$'\n'; done
-  WM_JOUT="$(LC_ALL=C WM_MODE=val WM_K="$keys" awk "$WM__AWK")"
+  WM_JOUT="$(LC_ALL=C WM_MODE=val WM_K="$keys" WM_PRE="${WM_PRE:-}" WM_MAXV="${WM_MAXV:-}" awk "$WM__AWK")"
   wm__json_assign "$prefix" "$@"
 }
 
 # wm__json_assign <prefix> <key>... : turn $WM_JOUT into variables
 wm__json_assign() {
-  local prefix="$1" k out line key rest t v found=$'\n' missing=""
+  local LC_ALL=C prefix="$1" k out line key rest t v n found=$'\n' missing=""
   shift
   for k in "$@"; do
     wm__san "$k"
     printf -v "${prefix}_$WM_SAN" '%s' ""
   done
   out="$WM_JOUT"
+  # records are "<byte length> <path><TAB><t><value>": split by offsets, because
+  # glob trims with a leading * are quadratic on a 64 KB value
   while [ -n "$out" ]; do
-    case "$out" in *$'\n'*) line="${out%%$'\n'*}"; out="${out#*$'\n'}" ;; *) line="$out"; out="" ;; esac
-    key="${line%%$'\t'*}"; rest="${line#*$'\t'}"
+    n="${out%% *}"
+    case "$n" in ""|*[!0-9]*) break ;; esac   # malformed record: stop, never loop
+    out="${out:${#n}+1}"
+    line="${out:0:n}"
+    out="${out:n+1}"
+    key="${line%%$'\t'*}"; rest="${line:${#key}+1}"
     t="${rest:0:1}"; v="${rest:1}"
-    if [ "$t" = s ]; then wm__unescape "$v"; v="$WM_U"
+    if [ "$t" = s ]; then
+      # keys named in WM_RAW stay escaped (large fields: caller cuts, then unescapes)
+      case " ${WM_RAW:-} " in *" $key "*) ;; *) wm__unescape "$v"; v="$WM_U" ;; esac
     elif [ "$v" = null ]; then continue; fi
     wm__san "$key"
     printf -v "${prefix}_$WM_SAN" '%s' "$v"
@@ -343,7 +366,7 @@ wm__json_get() {
   local rest
   wm__json_scan "$1" "$2"
   [ -n "$WM_JOUT" ] || return 1
-  rest="${WM_JOUT#*$'\t'}"
+  rest="${WM_JOUT#* }"; rest="${rest#*$'\t'}"   # drop the "<length> " prefix, then the path
   WM_JT="${rest:0:1}"
   WM_JV="${rest:1}"
 }
@@ -400,6 +423,116 @@ wm__escape() {
 wm_json_escape() {
   wm__escape "$1"
   printf '%s\n' "$WM_E"
+}
+
+# ---------------------------------------------------------- bash failure ----
+# The one place that interprets how Claude Code reports a failed Bash call
+# (docs/hook-contract.md): event PostToolUseFailure, tool Bash, string field
+# `error` = "Exit code N" + newline + output, is_interrupt true on aborts.
+
+# wm__bash_failed <event> <tool_name> <error> <is_interrupt> -> WM_XC (exit code)
+# rc 0 = failed Bash call. <error> may be raw (still escaped) or decoded.
+wm__bash_failed() {
+  local e="${3:0:32}"   # only the prefix matters; trims on the full 64 KB are quadratic
+  WM_XC=""
+  [ "$1" = PostToolUseFailure ] && [ "$2" = Bash ] && [ "$4" != true ] || return 1
+  case "$e" in "Exit code "[0-9]*) ;; *) return 1 ;; esac
+  e="${e:10}"
+  WM_XC="${e%%[!0-9]*}"
+}
+
+# wm_bash_failed <hook-json> -> rc 0 when it is a failed Bash call; prints the exit code.
+wm_bash_failed() {
+  local h_hook_event_name h_tool_name h_error h_is_interrupt h__missing
+  WM_MAXV=4096 wm_json_read "$1" h hook_event_name tool_name error is_interrupt
+  wm__bash_failed "$h_hook_event_name" "$h_tool_name" "$h_error" "$h_is_interrupt" || return 1
+  printf '%s\n' "$WM_XC"
+}
+
+# ----------------------------------------------------------------- inbox ----
+# wm__cut <s> <max bytes> -> WM_CL : cut on a UTF-8 boundary (call under LC_ALL=C)
+wm__cut() {
+  local s="$1" k="$2" c
+  if [ "${#s}" -gt "$k" ]; then
+    while [ "$k" -gt 0 ]; do
+      c="${s:k:1}"
+      case "$c" in [$'\200'-$'\277']) k=$((k - 1)) ;; *) break ;; esac
+    done
+    s="${s:0:k}"
+  fi
+  WM_CL="$s"
+}
+
+# wm__clip <text> <max lines> <max bytes> -> WM_CL : no CR or control chars
+# (tab/newline kept), first N lines, then a UTF-8 safe byte cap. Input should
+# already be small (callers cut raw fields first).
+wm__clip() {
+  local s="$1" nl="$2" out="" line k=0
+  s="${s//$'\r'/}"
+  s="${s//[$'\001'-$'\010'$'\013'-$'\037']/}"
+  while [ "$k" -lt "$nl" ] && [ -n "$s" ]; do
+    case "$s" in
+      *$'\n'*) line="${s%%$'\n'*}"; s="${s#*$'\n'}" ;;
+      *) line="$s"; s="" ;;
+    esac
+    out="$out$line"$'\n'
+    k=$((k + 1))
+  done
+  wm__cut "${out%$'\n'}" "$3"
+}
+
+# wm_inbox_add <layer> <id8> <state> <kind> <repo> <command> <exit> <body> [dedupe]
+# Appends one candidate block to inbox/<id8>.md (format: bin/cmd/triage.sh)
+# under lock `inbox`. Sets WM_IID. rc 0 added, 3 duplicate command (dedupe=1;
+# nothing written), 1 failure. Empty <command>/<exit> omit those lines.
+wm_inbox_add() {
+  local LC_ALL=C layer="$1" id8="$2" state="$3" kind="$4" repo="$5" cmd="$6" xc="$7" body="$8" dedupe="${9:-}"
+  local f line n max=0 fence=0 dup=0 blk p
+  WM_IID=""
+  f="$layer/inbox/$id8.md"
+  cmd="${cmd//$'\r'/}"; cmd="${cmd//$'\n'/ }"
+  cmd="${cmd//[$'\001'-$'\037']/ }"
+  wm__cut "$cmd" 300; cmd="$WM_CL"
+  repo="${repo//[$'\001'-$'\037']/ }"
+  wm__clip "$body" 20 4096; body="$WM_CL"
+  [ -d "$layer/inbox" ] || mkdir -p "$layer/inbox" 2>/dev/null || return 1
+  wm__lockq "$layer" inbox || return 1
+  if [ -f "$f" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line="${line%$'\r'}"
+      case "$line" in
+        '```'*) fence=$((1 - fence)) ;;
+        '## I-'*)
+          if [ "$fence" = 0 ]; then
+            n="${line#'## I-'}"
+            case "$n" in "$id8"-*) n="${n#"$id8"-}"; n="${n%%[!0-9]*}"; [ -z "$n" ] || [ "$n" -le "$max" ] || max="$n" ;; esac
+          fi ;;
+        '- command: '*)
+          [ "$fence" = 0 ] && [ -n "$dedupe" ] && [ "${line#- command: }" = "$cmd" ] && dup=1 ;;
+      esac
+    done < "$f"
+  fi
+  if [ "$dup" = 1 ]; then wm__unlockq "$layer" inbox; return 3; fi
+  WM_IID="I-$id8-$((max + 1))"
+  wm__now
+  blk="## $WM_IID — $state"$'\n'"- kind: $kind"$'\n'"- repo: $repo"$'\n'"- time: $WM_NOW"$'\n'
+  [ -z "$cmd" ] || blk="$blk- command: $cmd"$'\n'
+  [ -z "$xc" ] || blk="$blk- exit: $xc"$'\n'
+  blk="$blk"$'\n''```'$'\n'
+  while [ -n "$body" ]; do
+    case "$body" in
+      *$'\n'*) line="${body%%$'\n'*}"; body="${body#*$'\n'}" ;;
+      *) line="$body"; body="" ;;
+    esac
+    case "$line" in '```'*|'## '*) line=" $line" ;; esac   # keep the block parseable
+    blk="$blk$line"$'\n'
+  done
+  blk="$blk"'```'$'\n\n'
+  printf '%s' "$blk" >> "$f"
+  p=$?
+  wm__unlockq "$layer" inbox
+  [ "$p" = 0 ] || { WM_IID=""; return 1; }
+  return 0
 }
 
 # ----------------------------------------------------------- hook guard ----
@@ -489,6 +622,16 @@ wm_unlock() {
   rmdir "$layer/.locks/$1" 2>/dev/null
   return 0
 }
+
+# wm__lockq / wm__unlockq <layer> <name>: the same lock as wm_lock/wm_unlock,
+# but the uncontended case is one mkdir (no subshell, no seq): for hot-path
+# hooks. Contention and stale locks are wm_lock's job.
+wm__lockq() {
+  [ -d "$1/.locks" ] || mkdir -p "$1/.locks" 2>/dev/null || return 1
+  mkdir "$1/.locks/$2" 2>/dev/null && return 0
+  wm_lock "$2"
+}
+wm__unlockq() { rmdir "$1/.locks/$2" 2>/dev/null; return 0; }
 
 # --------------------------------------------------------------- commit ----
 # wm_commit <message>: 0 ok/no-op, 2 scan failed or scanner missing, 3 git failure.

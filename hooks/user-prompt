@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# waymark UserPromptSubmit hook (spec section 8).
+# A prompt that asks to remember something becomes a mandatory inbox candidate
+# and the model is told to record it before replying. Every other prompt: no
+# output. Always exits 0, prints valid JSON or nothing. No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+up_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && up_dir="$PWD" ;;
+  *) up_dir="$PWD" ;;
+esac
+up_plugin="${up_dir%/*}"
+. "$up_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard UserPromptSubmit
+
+# (^|[^a-z])(remember|note that|don't forget|dont forget|for future)([^a-z]|$), case-insensitive.
+# Spelled with bracket pairs: nocasematch is not reliable for =~ on bash 3.2.
+up_re="(^|[^A-Za-z])([Rr][Ee][Mm][Ee][Mm][Bb][Ee][Rr]|[Nn][Oo][Tt][Ee] [Tt][Hh][Aa][Tt]|[Dd][Oo][Nn]'[Tt] [Ff][Oo][Rr][Gg][Ee][Tt]|[Dd][Oo][Nn][Tt] [Ff][Oo][Rr][Gg][Ee][Tt]|[Ff][Oo][Rr] [Ff][Uu][Tt][Uu][Rr][Ee])([^A-Za-z]|\$)"
+
+up_main() {
+  local layer id8 cwd repo plain raw
+  local h_session_id h_cwd h_prompt h__missing
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+
+  # the prompt stays escaped (cut to 16 KB) until it is known to matter
+  WM_MAXV=16384 WM_RAW=prompt wm_json_read_stdin h session_id cwd prompt
+  raw="$h_prompt"
+  [ -n "$raw" ] || return 0
+
+  # escapes become separators, so "\nremember" still has a word boundary
+  plain="${raw//\\?/ }"
+  [[ $plain =~ $up_re ]] || return 0
+
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
+  cwd="$h_cwd"
+  case "$cwd" in *\\*|[A-Za-z]:*) cwd="$(wm_path "$cwd")" ;; esac
+  wm__repo_name "${cwd:-$up_pwd}"; repo="${WM_RN:-none}"
+
+  wm__unescape "${raw:0:8192}"
+  wm_inbox_add "$layer" "$id8" mandatory remember "$repo" "" "" "$WM_U"
+  wm_emit_context UserPromptSubmit 'The user asked you to remember something. Record it with `waymark record …` (then `--from <ID>`) before you reply.'"${WM_IID:+ Candidate: $WM_IID.}"
+  return 0
+}
+
+up_main
+exit 0
