@@ -87,13 +87,16 @@ t__json_escape() {
   printf '%s' "$s"
 }
 
-# t_hook_json <event> [key=value...]  -- dotted keys become nested objects
+# t_hook_json <event> [key=value | key:=rawvalue ...]
+#   key=value   string field (JSON-escaped)
+#   key:=value  raw field, emitted unquoted (true/false/number/null/...)
+#   dotted keys (tool_input.command=...) become nested objects (one level)
 t_hook_json() {
   local event="$1"; shift
-  local -a flat=() groups=()
-  local kv k v g
+  local -a groups=()
+  local kv k g
   for kv in "$@"; do
-    k="${kv%%=*}"; v="${kv#*=}"
+    t__kv "$kv"; k="$T_K"
     case "$k" in
       *.*) g="${k%%.*}"
            case " ${groups[*]:-} " in *" $g "*) ;; *) groups+=("$g") ;; esac ;;
@@ -102,23 +105,39 @@ t_hook_json() {
   local out
   out="{\"hook_event_name\":\"$(t__json_escape "$event")\""
   for kv in "$@"; do
-    k="${kv%%=*}"; v="${kv#*=}"
-    case "$k" in *.*) continue ;; esac
-    out="$out,\"$(t__json_escape "$k")\":\"$(t__json_escape "$v")\""
+    t__kv "$kv"
+    case "$T_K" in *.*) continue ;; esac
+    out="$out,\"$(t__json_escape "$T_K")\":$(t__json_val)"
   done
   for g in ${groups[@]+"${groups[@]}"}; do
     out="$out,\"$(t__json_escape "$g")\":{"
     local first=1
     for kv in "$@"; do
-      k="${kv%%=*}"; v="${kv#*=}"
-      case "$k" in "$g".*) ;; *) continue ;; esac
+      t__kv "$kv"
+      case "$T_K" in "$g".*) ;; *) continue ;; esac
       [ $first = 1 ] || out="$out,"
       first=0
-      out="$out\"$(t__json_escape "${k#*.}")\":\"$(t__json_escape "$v")\""
+      out="$out\"$(t__json_escape "${T_K#*.}")\":$(t__json_val)"
     done
     out="$out}"
   done
-  printf '%s}\n' "$out"
+  printf '%s}
+' "$out"
+}
+
+# t__kv "k=v" or "k:=v" -> T_K, T_V, T_RAW
+t__kv() {
+  local kv="$1" head
+  T_RAW=0
+  head="${kv%%=*}"
+  case "$head" in
+    *:) T_K="${head%:}"; T_V="${kv#*=}"; T_RAW=1 ;;
+    *)  T_K="$head"; T_V="${kv#*=}" ;;
+  esac
+}
+
+t__json_val() {
+  if [ "$T_RAW" = 1 ]; then printf '%s' "$T_V"; else printf '"%s"' "$(t__json_escape "$T_V")"; fi
 }
 
 # Prints PASS/FAIL table for $WM_RESULTS; returns 1 on any FAIL.
