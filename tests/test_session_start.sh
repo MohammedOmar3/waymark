@@ -5,7 +5,7 @@
 
 # t_ss_setup: bare layer in $L (WAYMARK_ROOT), fake repo "alpha" in $R
 t_ss_setup() {
-  L="$WM_SANDBOX_DIR/layer"; R="$WM_SANDBOX_DIR/alpha"
+  L="$WM_SANDBOX_DIR/${WM_LAYER_SUB:-layer}"; R="$WM_SANDBOX_DIR/alpha"
   mkdir -p "$L/playbooks" "$L/repos" "$L/stats" "$L/active" "$L/inbox"
   printf 'repo_roots=\n' > "$L/layer.conf"
   printf 'expo*=expo\nreact=react\n' > "$L/tags.conf"
@@ -172,7 +172,8 @@ test_compact_pending() {
   t_not_contains "$CTX" "just compacted" "no instruction on startup"
 }
 
-test_budget() {
+# t_ss_budget_check [strict]: every section at its cap; strict also expects them all to survive
+t_ss_budget_check() {
   local i n pk=""
   t_ss_setup
   for i in $(seq 1 20); do
@@ -196,11 +197,11 @@ test_budget() {
   t_contains "$CTX" "waymark layer: '$L'" "layer identity survives"
   t_contains "$CTX" "waymark CLI: bash '$L/bin/waymark'" "cli identity survives"
   t_contains "$CTX" "active file: '$L/active/alpha--abcdef12.md'" "active file survives"
-  t_contains "$CTX" "waymark handoff" "compact instruction survives"
-  t_contains "$CTX" "untriaged from last session" "notices survive"
+  [ "${1:-}" = strict ] && t_contains "$CTX" "waymark handoff" "compact instruction survives"
+  [ "${1:-}" = strict ] && t_contains "$CTX" "untriaged from last session" "notices survive"
   case "$RAW" in '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}') t__pass "json envelope" ;; *) t__fail "json envelope" "$RAW" ;; esac
   case "$RAW" in *$'\n'*$'\n'*) t__fail "single line" ;; *) t__pass "single line" ;; esac
-  t_contains "$CTX" "(truncated; see" "truncation marker"
+  [ "${1:-}" = strict ] && t_contains "$CTX" "(truncated; see" "truncation marker"
   t_contains "$CTX" "session: abcdef12" "identity survives"
 }
 
@@ -244,30 +245,6 @@ test_launcher() {
   t_contains "$(<"$WM_PLUGIN/hooks/hooks.json")" '"matcher": "Bash"' "failure event registered"
 }
 
-# t_ss_guard_case <name> <layer lib content...>: hostile layer copy of lib.sh
-t_ss_guard_case() {
-  local name="$1" raw rc
-  shift
-  t_ss_setup
-  mkdir -p "$L/bin"
-  printf '%s\n' "$@" > "$L/bin/lib.sh"
-  raw="$(t_hook_json SessionStart session_id=abcdef1234 cwd="$R" source=startup | bash "$WM_PLUGIN/hooks/session-start")"; rc=$?
-  t_eq "0" "$rc" "$name: exit 0"
-  case "$raw" in
-    '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}'|'') t__pass "$name: json or empty" ;;
-    *) t__fail "$name: json or empty" "$raw" ;;
-  esac
-  t_contains "$raw" "session: abcdef12" "$name: names the session"
-}
-
-test_guard_layer_lib_noisy() { t_ss_guard_case noisy 'echo stale-debug' 'echo err >&2'; }
-test_guard_layer_lib_set_e() { t_ss_guard_case set-e 'set -eu' 'false || true'; }
-test_guard_layer_lib_exit() { t_ss_guard_case exit3 'exit 3'; }
-test_guard_layer_lib_stale() {
-  # a stale copy lacking the new helpers falls back to the plugin lib
-  t_ss_guard_case stale 'wm_layer_root() { return 1; }'
-}
-
 test_untriaged_skips_live_sessions() {
   t_ss_setup
   printf 'repo: alpha\nstatus: working\n' > "$L/active/alpha--bbbb2222.md"
@@ -289,4 +266,48 @@ test_cwd_backslashes_and_space() {
   t_contains "$CTX" "repo: my repo" "repo from windows-style cwd with space"
   t_file_exists "$L/active/my repo--abcdef12.md" "active file for spaced repo"
   unset CWD
+}
+
+test_budget() { t_ss_budget_check strict; }
+
+test_budget_long_layer_path() {
+  local i sub="layer"
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do sub="segment-number-$i-padding/$sub"; done
+  WM_LAYER_SUB="$sub"
+  t_ss_budget_check
+  t_eq "1" "$([ "${#L}" -gt 300 ] && echo 1 || echo 0)" "layer path is long (${#L})"
+  case "$CTX" in *"waymark CLI: bash '"*) ;; *) t__fail "cli line present" ;; esac
+}
+
+test_apostrophe_layer_path() {
+  local line q
+  WM_LAYER_SUB="O'Brien/my layer"
+  t_ss_setup
+  t_ss_ctx
+  line="${CTX#*waymark CLI: bash }"; q="${line%% (the *}"
+  t_eq "$L/bin/waymark" "$(eval "printf %s $q")" "quoted cli path round-trips"
+  line="${CTX#*active file: }"; q="${line%%$'\n'*}"
+  t_eq "$L/active/alpha--abcdef12.md" "$(eval "printf %s $q")" "quoted active file round-trips"
+}
+
+test_layer_lib_copy_ignored() {
+  local raw ref
+  t_ss_setup
+  ref="$(t_ss_run session_id=abcdef1234 cwd="$R" source=startup)"
+  mkdir -p "$L/bin"
+  printf '%s\n' 'echo stale-debug' 'wm_layer_root() { return 1; }' 'exit 3' > "$L/bin/lib.sh"
+  raw="$(t_ss_run session_id=abcdef1234 cwd="$R" source=startup)"
+  t_eq "$ref" "$raw" "garbage layer bin/lib.sh has no effect"
+}
+
+test_guard_internal_failure() {
+  local raw rc P="$WM_SANDBOX_DIR/plugincopy"
+  t_ss_setup
+  mkdir -p "$P"
+  cp -r "$WM_PLUGIN/hooks" "$WM_PLUGIN/bin" "$WM_PLUGIN/templates" "$P/"
+  sed -i 's|^  layer="\$WM_LAYER"$|&; set -e; false; exit 7|' "$P/hooks/session-start"
+  raw="$(t_hook_json SessionStart session_id=abcdef1234 cwd="$R" source=startup | bash "$P/hooks/session-start")"; rc=$?
+  t_eq "0" "$rc" "exit 0 on internal failure"
+  case "$raw" in '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}') t__pass "valid json on internal failure" ;; *) t__fail "valid json on internal failure" "$raw" ;; esac
+  t_contains "$raw" "session: abcdef12" "names the session"
 }
