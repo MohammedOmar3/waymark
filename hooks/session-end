@@ -18,6 +18,7 @@ esac
 se_plugin="${se_dir%/*}"
 . "$se_plugin/bin/lib.sh" 2>/dev/null || exit 0
 wm_hook_guard SessionEnd
+shopt -u patsub_replacement 2>/dev/null # keep '&' in a repo name literal (bash 5.2)
 
 se_log() { # <layer> <message>
   wm__now
@@ -207,6 +208,8 @@ se_main() {
   [ "$alocked" = 0 ] || wm__unlockq "$layer" "active-$id8"
 
   # ---- autosave + viewer: detached unless the test hook asks otherwise ----
+  # active/ is gitignored, so a fresh clone may lack it; the log redirect needs it
+  [ -d "$layer/active" ] || mkdir -p "$layer/active" 2>/dev/null
   if [ "${WAYMARK_SESSION_END_SYNC:-}" = 1 ]; then
     se_background "$layer" "$id8" </dev/null >>"$layer/active/.session-end.log" 2>&1
   else

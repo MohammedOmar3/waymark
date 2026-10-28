@@ -187,3 +187,23 @@ test_session_end_background_autosave() {
   done
   t_eq "chore: autosave session abcdef12" "$subj" "background autosave landed"
 }
+
+test_session_end_fresh_clone_no_active_dir() {
+  t_se_setup
+  rm -rf "$L/active"
+  local out; out="$(t_se_run 2>&1)"
+  t_eq "" "$out" "silent without active/"
+  t_eq "chore: autosave session abcdef12" "$(git -C "$L" log -1 --format=%s)" "autosave still runs"
+}
+
+test_session_end_ampersand_repo_name() {
+  t_se_setup
+  local A="$WM_SANDBOX_DIR/a&b"
+  t_fake_repo "$A"
+  t_se_active "a&b" "t" "" "next step"
+  t_se_run "$A" >/dev/null 2>&1
+  t_file_exists "$L/repos/a&b.md" "repo file created"
+  local c; c="$(<"$L/repos/a&b.md")"
+  t_contains "$c" "a&b" "repo name kept literal"
+  t_not_contains "$c" "<repo>" "placeholder substituted"
+}
