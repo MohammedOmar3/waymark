@@ -1,4 +1,5 @@
 #!/bin/sh
 # waymark layer pre-commit hook: block commits that contain secrets.
+# Scans the staged set (the files this commit adds or changes).
 top="$(git rev-parse --show-toplevel)" || exit 1
-exec bash "$top/bin/waymark" scan --root "$top"
+exec bash "$top/bin/waymark" scan --root "$top" --staged

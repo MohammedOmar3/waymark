@@ -188,3 +188,59 @@ test_redaction_cross_pattern() {
     t_not_contains "$log" "$s" "log hides $s"
   done
 }
+
+# t_scan_git_layer <dir>: scan layer as a git repo with the real layer .gitignore
+t_scan_git_layer() {
+  t_scan_layer "$1"
+  mkdir -p "$1/playbooks"
+  cp "$WM_PLUGIN/templates/layer/.gitignore" "$1/.gitignore"
+  git -C "$1" init -q -b main 2>/dev/null || git -C "$1" init -q
+}
+
+test_scan_covers_every_committable_file() {
+  local layer="$WM_SANDBOX_DIR/layer-all" out rc
+  t_scan_git_layer "$layer"
+  printf '{"token_sample": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}\n' > "$layer/docs/sample.json"
+  printf '#!/bin/sh\nexport GH=ghp_abcdefghijklmnopqrstuvwxyz0123456789\n' > "$layer/playbooks/setup.sh"
+  out="$(bash "$layer/bin/waymark" scan --root "$layer" 2>&1)"; rc=$?
+  t_eq 1 "$rc" "token in json/sh fails the scan"
+  t_contains "$out" "docs/sample.json" "json file scanned"
+  t_contains "$out" "playbooks/setup.sh" "sh file scanned"
+  ( . "$WM_PLUGIN/bin/lib.sh"; export WAYMARK_ROOT="$layer"; wm_commit "x" ) >/dev/null 2>&1
+  t_eq 2 "$?" "wm_commit refuses json/sh token"
+  t_eq "0" "$(git -C "$layer" rev-list --all --count 2>/dev/null)" "nothing committed"
+}
+
+test_scan_skips_gitignored_files() {
+  local layer="$WM_SANDBOX_DIR/layer-ign"
+  t_scan_git_layer "$layer"
+  printf 'handoff: password = hunter2x\n' > "$layer/active/repo--abcd1234.md"
+  printf 'all clear\n' > "$layer/docs/ok.md"
+  bash "$layer/bin/waymark" scan --root "$layer" >/dev/null 2>&1
+  t_eq 0 "$?" "gitignored active/*.md not scanned"
+  ( . "$WM_PLUGIN/bin/lib.sh"; export WAYMARK_ROOT="$layer"; wm_commit "x" ) >/dev/null 2>&1
+  t_eq 0 "$?" "commit not blocked by gitignored file"
+  t_eq "1" "$(git -C "$layer" rev-list --all --count 2>/dev/null)" "committed"
+}
+
+test_precommit_scans_staged_set() {
+  local layer="$WM_SANDBOX_DIR/layer-staged"
+  t_scan_git_layer "$layer"
+  cp "$WM_PLUGIN/templates/pre-commit" "$layer/.git/hooks/pre-commit"
+  chmod +x "$layer/.git/hooks/pre-commit"
+  printf '{"k": "ghp_abcdefghijklmnopqrstuvwxyz0123456789"}\n' > "$layer/docs/sample.json"
+  git -C "$layer" add -A
+  t_exit 1 "staged json token blocked" -- git -C "$layer" commit -q -m bad
+  git -C "$layer" rm -q --cached docs/sample.json
+  t_exit 0 "unstaged token does not block a clean staged commit" -- git -C "$layer" commit -q -m good
+}
+
+test_email_redaction_mixed_case() {
+  local layer="$WM_SANDBOX_DIR/layer-emcase" out
+  t_scan_layer "$layer" me@example.org
+  t_plant "$layer" 'ping Other.Person@Example.ORG today'
+  out="$(bash "$layer/bin/waymark" scan --root "$layer" 2>&1)"
+  t_contains "$out" "[email at owner domain]" "mixed-case email flagged"
+  t_contains "$out" "ping [REDACTED] today" "mixed-case email redacted"
+  t_not_contains "$out" "Other.Person" "local part hidden"
+}

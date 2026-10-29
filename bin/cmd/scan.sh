@@ -1,11 +1,13 @@
-# waymark scan [--root <dir>]  (sourced by bin/waymark; uses exit)
+# waymark scan [--root <dir>] [--staged]  (sourced by bin/waymark; uses exit)
 # Patterns are written with single-character classes ([s]k-) so this file
 # does not match its own rules. POSIX ERE only; bash 3.2 compatible.
 # Findings never echo the matched value: it is replaced by [REDACTED].
 
 wm_scan_root=""
+wm_scan_staged=0
 while [ $# -gt 0 ]; do
   case "$1" in
+    --staged) wm_scan_staged=1; shift ;;
     --root) wm_scan_root="${2:-}"; shift 2 || shift ;;
     --root=*) wm_scan_root="${1#--root=}"; shift ;;
     *) printf 'waymark scan: unknown argument: %s\n' "$1" >&2; exit 64 ;;
@@ -50,13 +52,26 @@ wm_scan_flush() {
   done
 }
 
-# File list: *.md *.conf *.tsv anywhere, plus everything under bin/.
+# File list: exactly what git would commit. In a git root that is every
+# tracked or untracked-but-not-ignored file (--staged: the staged set, for the
+# pre-commit hook); gitignored files (active/, inbox/, .view/, logs) are never
+# scanned. Outside git: every file except the layer's runtime directories.
+# Binary files are skipped by grep -I below.
 wm_scan_files=()
-while IFS= read -r wm_f; do
-  wm_scan_files+=("${wm_f#./}")
-done < <(find . \( -name .git -o -name inbox -o -name .view \) -prune -o -type f \
-  \( -name '*.md' -o -name '*.conf' -o -name '*.tsv' -o -path './bin/*' \) \
-  ! -name '*.log' -print 2>/dev/null | sort)
+if [ -e .git ] && git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  while IFS= read -r -d '' wm_f; do
+    [ -f "$wm_f" ] && wm_scan_files+=("$wm_f")
+  done < <(if [ "$wm_scan_staged" = 1 ]; then
+             git diff --cached --name-only -z --diff-filter=ACMR 2>/dev/null
+           else
+             git ls-files -z -co --exclude-standard 2>/dev/null
+           fi)
+else
+  while IFS= read -r wm_f; do
+    wm_scan_files+=("${wm_f#./}")
+  done < <(find . \( -name .git -o -name inbox -o -name .view -o -name .locks -o -path ./active \) -prune -o -type f \
+    ! -name '*.log' ! -name '*.tmp' ! -name '*.bak' -print 2>/dev/null | sort)
+fi
 
 if [ "${#wm_scan_files[@]}" -gt 0 ]; then
   # name|regex  (matched text is redacted)
@@ -129,7 +144,10 @@ if [ "${#wm_scan_files[@]}" -gt 0 ]; then
         wm_hl="${wm_hr%%:*}"; wm_hm="$(wm_lower "${wm_hr#*:}")"
         wm_hm="${wm_hm%@*}@$wm_dom"
         case "$wm_allow" in *",$wm_hm,"*) continue ;; esac
-        wm_scan_hit "$wm_hf" "$wm_hl" "email at owner domain" "$wm_hm"
+        # redact the address as written (original case, trailing delimiter cut)
+        wm_ho="${wm_hr#*:}"; wm_hd="${wm_ho##*@}"
+        wm_ho="${wm_ho%@*}@${wm_hd:0:${#wm_dom}}"
+        wm_scan_hit "$wm_hf" "$wm_hl" "email at owner domain" "$wm_ho"
       done < <(grep -HnIoiE -e "[A-Za-z0-9._%+-]+@${wm_dom_re}([^A-Za-z0-9-]|$)" -- "${wm_scan_files[@]}" 2>/dev/null)
       ;;
   esac
