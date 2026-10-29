@@ -89,10 +89,14 @@ async function load(path) {
   await send('Page.navigate', { url: pathToFileURL(path).href });
   await until(`document.readyState === 'complete' && document.getElementById('wm-article') && document.getElementById('wm-article').dataset.state !== 'loading'`);
 }
-async function key(k) {
+async function key(k, modifiers = 0) {
   // only printable keys carry text, so a named key such as Escape types nothing into a field
-  for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: k, text: type === 'keyDown' && k.length === 1 ? k : undefined });
+  for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: k, modifiers, text: type === 'keyDown' && k.length === 1 ? k : undefined });
 }
+async function click(x, y) {
+  for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+}
+const focusInfo = `(() => { const a = document.activeElement; return { id: a.id, tag: a.tagName, inSearch: document.getElementById('wm-search').contains(a), inArticle: document.getElementById('wm-article').contains(a), key: a.id || a.getAttribute('href') || a.tagName }; })()`;
 async function typeQuery(q) {
   await ev(`(() => { const i = document.getElementById('wm-q'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
   await sleep(350); // search input is debounced
@@ -166,6 +170,40 @@ try {
   await ev(`document.getElementById('wm-search-close').click()`);
   await sleep(350);
   report((await ev(`location.hash`)) === before, 'Close button cancels the pending search debounce');
+
+  // the search panel is modal: Tab stays inside, a backdrop click closes it without reaching the page,
+  // and every dismissal (Escape, Close, backdrop) returns focus to the Search button
+  await ev(`document.getElementById('wm-search-open').click()`);
+  report(await ev(`!document.getElementById('wm-search-backdrop').hidden && document.activeElement.id === 'wm-q'`), 'search opens over a backdrop with focus in the field');
+  await typeQuery('offline');
+  await until(`document.querySelector('#wm-results a')`);
+  const seen = new Set(); let inside = true;
+  for (const mod of [0, 0, 0, 0, 0, 0, 8, 8, 8, 8]) {
+    await key('Tab', mod);
+    const f = await ev(focusInfo);
+    if (!f.inSearch) inside = false;
+    seen.add(f.key);
+  }
+  report(inside && seen.size >= 3, 'Tab and Shift+Tab stay inside the search panel', JSON.stringify([...seen]));
+  const link = await ev(`(() => { const r = document.querySelector('#wm-tree a[data-path="decisions.md"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await click(link.x, link.y);
+  await sleep(200);
+  const bd = await ev(`({ panel: document.getElementById('wm-search').hidden, backdrop: document.getElementById('wm-search-backdrop').hidden, focus: document.activeElement.id, hash: location.hash })`);
+  report(bd.panel && bd.backdrop && bd.focus === 'wm-search-open' && bd.hash === before, 'backdrop click closes search, returns focus to Search and does not reach the tree link under it', JSON.stringify(bd));
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await key('Escape');
+  report(await ev(`document.getElementById('wm-search').hidden && document.activeElement.id === 'wm-search-open'`), 'Escape closes search and returns focus to Search');
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await ev(`document.getElementById('wm-search-close').click()`);
+  report(await ev(`document.getElementById('wm-search').hidden && document.getElementById('wm-search-backdrop').hidden && document.activeElement.id === 'wm-search-open'`), 'Close button closes search and returns focus to Search');
+
+  // snippets read as text, not markdown
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await typeQuery('offline');
+  await until(`document.querySelector('#wm-results li[data-path="decisions.md"]')`);
+  const snip = await ev(`document.querySelector('#wm-results li[data-path="decisions.md"] [data-role=snippet]').textContent`);
+  report(/offline/i.test(snip) && !/\*\*|##|^---|\s---\s|`|\|/.test(snip), 'search snippet has no markdown syntax', JSON.stringify(snip));
+  await key('Escape');
 
   // 4. mermaid renders
   await ev(`location.hash = '#docs/waymark/x.md'`);
@@ -251,10 +289,18 @@ try {
     await ev(`document.getElementById('wm-nav-toggle').click()`);
     const o = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded'), sw: document.documentElement.scrollWidth, iw: innerWidth })`);
     report(o.nav !== 'none' && o.exp === 'true' && o.sw <= o.iw, '375px: Files button opens the tree', JSON.stringify(o));
-    await ev(`document.querySelector('#wm-tree a[data-path="gotchas.md"]').click()`);
+    await ev(`(() => { const a = document.querySelector('#wm-tree a[data-path="gotchas.md"]'); a.focus(); a.click(); })()`);
     await until(`document.getElementById('wm-article').dataset.path === 'gotchas.md'`);
     const c = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded') })`);
     report(c.nav === 'none' && c.exp === 'false', '375px: choosing a file closes the menu', JSON.stringify(c));
+    await until(`document.activeElement && document.activeElement.tagName === 'H1'`, 3000);
+    const cf = await ev(focusInfo);
+    report(cf.inArticle && cf.tag === 'H1', '375px: choosing a file from the menu moves focus to the article heading', JSON.stringify(cf));
+    await ev(`document.getElementById('wm-nav-toggle').click()`);
+    await ev(`document.querySelector('#wm-tree a[data-path="decisions.md"]').focus()`);
+    await key('Escape');
+    const ef = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded'), focus: document.activeElement.id })`);
+    report(ef.nav === 'none' && ef.exp === 'false' && ef.focus === 'wm-nav-toggle', '375px: Escape closes the menu and returns focus to Files', JSON.stringify(ef));
     await viewport(1440, 900);
     await load(htmlPath);
     await ev(`location.hash = '#docs/waymark/x.md'`);
@@ -266,6 +312,17 @@ try {
     report(w.sw <= w.iw && w.nav !== 'none' && w.navW > 200 && w.toggle === 'none' && w.pCh >= 45 && w.pCh <= 75, '1440px: sidebar shown, no menu button, prose measure 45 to 75ch, no horizontal scroll', JSON.stringify(w));
   }
   tag = '';
+
+  // scripting off: the notice shows and controls that cannot work are hidden
+  await send('Emulation.setScriptExecutionDisabled', { value: true });
+  await send('Page.navigate', { url: pathToFileURL(htmlPath).href });
+  await sleep(800);
+  const ns = await send('Runtime.evaluate', { expression: `JSON.stringify({ notice: !!document.getElementById('wm-noscript') && getComputedStyle(document.getElementById('wm-noscript')).display !== 'none',
+    search: getComputedStyle(document.getElementById('wm-search-open')).display, filter: getComputedStyle(document.getElementById('wm-filter')).display,
+    article: getComputedStyle(document.getElementById('wm-article')).display })`, returnByValue: true });
+  await send('Emulation.setScriptExecutionDisabled', { value: false });
+  const nso = JSON.parse(ns.result.result.value || '{}');
+  report(nso.notice && nso.search === 'none' && nso.filter === 'none' && nso.article === 'none', 'scripting off: notice shown, search, filter and article hidden', JSON.stringify(nso));
 
   report(problems.length === 0, 'no page errors or console errors', problems.slice(0, 3).join(' | '));
 } catch (e) {

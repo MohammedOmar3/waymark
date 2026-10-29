@@ -1,9 +1,10 @@
 /* Hallmark · shape: app screen · genre: editorial · theme: Editorial (deal 1/3, seed offline-snapshot-viewer-developer-daf6·3f2520c1·2026-10-29·r0)
- * nav: top bar with the wordmark, the build time and search; a file tree in a paper-2 sidebar, a menu under 60rem · signature: the reading pane and its entry header (path, title, status, tags, dates; entry IDs set as marks) · states: loading, empty, error, full, not found, expired
+ * nav: top bar over a hairline with the wordmark, the build time and search (a modal panel with a backdrop); one heavy rule per screen, the entry header's; a file tree in a paper-2 sidebar, a menu under 60rem · signature: the reading pane and its entry header (path, title, status, tags, dates; entry IDs set as marks) · states: loading, empty, error, full, not found, expired
  * axes: light/display-condensed/chromatic-green · posture: restrained · modes: light+dark · contrast: pass · v2.0.0 */
 /* Hallmark · pre-emit critique: P4 H4 E4 S4 R5 V3 · weakest: V, an app screen shares the sidebar-and-pane shell with every reader; the entry header and ID marks carry the difference instead */
 /* Hallmark · waive 1 · faces are system stacks, Bahnschrift condensed for heads · ruling R26: the snapshot must open offline with no embedded or remote fonts */
-/* Hallmark · scripting-off waiver (brief, Task 13 step 2; Floor 7 and gate 62 are not waivable by sloplint, so it is recorded here) · with scripting off the page shows a noscript notice in place of the article · the snapshot embeds markdown as base64 and renders it client-side, so no file text exists to show without scripting */
+/* Hallmark · scripting-off waiver (brief, Task 13 step 2; Floor 7 and gate 62 are not waivable by sloplint, so it is recorded here) · with scripting off the page shows a noscript notice in place of the article, and hides search, filter and menu controls that cannot work · the snapshot embeds markdown as base64 and renders it client-side, so no file text exists to show without scripting */
+/* Hallmark · finish-review: controller reviewer (R27) · fix · 10 findings · 10 resolved in fix round 1 */
 /* Hallmark · answered F23 · the snapshot has lang and a title; a meta description is pointless on a local file nobody indexes */
 :root {
   color-scheme: light dark;
@@ -13,7 +14,7 @@
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1); --ease-in: cubic-bezier(0.7, 0, 0.84, 0); --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --dur-micro: 120ms; --dur-short: 220ms; --dur-long: 420ms;
   --container: 1440px; --gutter: 40px; --gap-columns: 32px;
-  --sidebar: 18rem; --bar: 3.5rem; --control: 2.25rem; --hit: 2.75rem; --measure: 60ch; --wide: 64rem;
+  --sidebar: 18rem; --bar: 3.5rem; --control: 2.25rem; --hit: 2.75rem; --measure: 60ch; --wide: 64rem; --alert: 48rem; --meta-key: 7rem;
   --z-base: 1; --z-raised: 10; --z-dropdown: 100; --z-sticky: 200; --z-sticky-nav: 300; --z-modal: 400; --z-toast: 500; --z-tooltip: 600;
   --color-paper: oklch(97% 0.007 86); --color-paper-2: oklch(94% 0.010 86); --color-paper-3: oklch(91% 0.012 84);
   --color-ink: oklch(16% 0.012 280); --color-ink-2: oklch(29% 0.011 280); --color-muted: oklch(46% 0.010 75);

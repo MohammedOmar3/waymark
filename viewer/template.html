@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Waymark snapshot</title>
 <!--WAYMARK:CSS-->
+<script>document.documentElement.className += ' js';</script>
 </head>
 <body>
 <header id="wm-top">
@@ -13,6 +14,7 @@
 <p id="wm-stamp">Snapshot built <span id="wm-built"><!--WAYMARK:BUILT--></span></p>
 <button type="button" id="wm-search-open" aria-controls="wm-search" aria-expanded="false"><span>Search</span> <kbd>/</kbd></button>
 </header>
+<div id="wm-search-backdrop" hidden></div>
 <section id="wm-search" role="search" aria-label="Search" hidden>
 <div id="wm-search-bar">
 <label for="wm-q">Search all files</label>
@@ -48,6 +50,7 @@ var pendingHighlight = null;
 var mermaidPromise = null;
 var mermaidCount = 0;
 var searchTimer = null;
+var focusAfterRender = false;
 var FOLDER_KEY = 'waymark.view.closedFolders';
 
 var $ = function (id) { return document.getElementById(id); };
@@ -106,13 +109,40 @@ function loadVendor(id) {
     document.head.appendChild(s);
   });
 }
+// token -> #rrggbb, painted on a 1px canvas so any CSS colour syntax (oklch) resolves
+function tokenHex(name) {
+  var v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  var c = document.createElement('canvas');
+  c.width = 1; c.height = 1;
+  var ctx = c.getContext('2d');
+  ctx.fillStyle = v;
+  ctx.fillRect(0, 0, 1, 1);
+  var d = ctx.getImageData(0, 0, 1, 1).data;
+  return '#' + [d[0], d[1], d[2]].map(function (n) { return (n < 16 ? '0' : '') + n.toString(16); }).join('');
+}
+function mermaidConfig() {
+  var root = getComputedStyle(document.documentElement);
+  var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var paper = tokenHex('--color-paper'), paper2 = tokenHex('--color-paper-2'), paper3 = tokenHex('--color-paper-3');
+  var ink = tokenHex('--color-ink'), ink2 = tokenHex('--color-ink-2'), muted = tokenHex('--color-muted'), rule2 = tokenHex('--color-rule-2');
+  return {
+    startOnLoad: false, securityLevel: 'strict', theme: 'base', htmlLabels: false, flowchart: { htmlLabels: false },
+    themeVariables: {
+      darkMode: !!dark, fontFamily: root.getPropertyValue('--font-label').trim(), fontSize: '15px',
+      background: paper2, mainBkg: paper, primaryColor: paper, primaryTextColor: ink, primaryBorderColor: ink2,
+      secondaryColor: paper3, secondaryTextColor: ink, secondaryBorderColor: rule2,
+      tertiaryColor: paper2, tertiaryTextColor: ink, tertiaryBorderColor: rule2,
+      nodeBorder: ink2, nodeTextColor: ink, textColor: ink, lineColor: muted, defaultLinkColor: muted,
+      clusterBkg: paper3, clusterBorder: rule2, titleColor: ink, edgeLabelBackground: paper2,
+      noteBkgColor: paper3, noteTextColor: ink, noteBorderColor: rule2,
+      actorBkg: paper, actorBorder: ink2, actorTextColor: ink, actorLineColor: muted, signalColor: ink2, signalTextColor: ink,
+      labelBoxBkgColor: paper3, labelBoxBorderColor: rule2, labelTextColor: ink, loopTextColor: ink
+    }
+  };
+}
 function loadMermaid() {
   if (!mermaidPromise) {
-    mermaidPromise = loadVendor('wm-mermaid').then(function () {
-      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
-      window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', htmlLabels: false, flowchart: { htmlLabels: false } });
-      return window.mermaid;
-    });
+    mermaidPromise = loadVendor('wm-mermaid').then(function () { return window.mermaid; });
   }
   return mermaidPromise;
 }
@@ -151,13 +181,28 @@ function loadFiles() {
     var h1 = /^#[ \t]+(.+?)[ \t]*$/m.exec(p.body);
     f.title = (p.fm && p.fm.title) || (h1 && h1[1]) || f.path.split('/').pop();
     f.lower = f.text.toLowerCase();
-    f.flat = f.text.replace(/\s+/g, ' ');
+    f.flat = plainText(p.body).replace(/\s+/g, ' ').trim();
     f.flatLower = f.flat.toLowerCase();
     f.titleLower = f.title.toLowerCase();
     files.push(f);
     byPath[f.path] = f;
     scanEntries(f);
   }
+}
+function plainText(md) {
+  return md.split('\n').map(function (line) {
+    if (/^\s*(```|~~~)/.test(line)) { return ''; }
+    if (/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)*\|?\s*$/.test(line)) { return ''; }
+    return line
+      .replace(/^\s{0,3}#{1,6}\s+/, '')
+      .replace(/^\s*>\s?/, '')
+      .replace(/^\s*(?:[-*+]|\d+[.)])\s+(?:\[[ xX]\]\s+)?/, '')
+      .replace(/^\s*\|\s*|\s*\|\s*$/g, '')
+      .replace(/\s*\|\s*/g, ', ')
+      .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+      .replace(/(\*\*|`)/g, '')
+      .replace(/^\s*(?:-{3,}|\*{3,})\s*$/, '');
+  }).join(' ');
 }
 function scanEntries(f) {
   var inFence = false;
@@ -381,6 +426,7 @@ function renderMermaid(root, token) {
   var blocks = root.querySelectorAll('code.language-mermaid');
   if (!blocks.length) { return Promise.resolve(); }
   return loadMermaid().then(function (mermaid) {
+    mermaid.initialize(mermaidConfig());
     var chain = Promise.resolve();
     Array.prototype.forEach.call(blocks, function (code) {
       chain = chain.then(function () {
@@ -391,8 +437,7 @@ function renderMermaid(root, token) {
         mermaidCount += 1;
         return mermaid.render('wm-mm-' + mermaidCount, src).then(function (res) {
           holder.innerHTML = window.DOMPurify.sanitize(res.svg, {
-            USE_PROFILES: { svg: true, svgFilters: true, html: true },
-            ADD_TAGS: ['foreignObject']
+            USE_PROFILES: { svg: true, svgFilters: true, html: true }
           });
           pre.parentNode.replaceChild(holder, pre);
         }, function (err) {
@@ -449,8 +494,16 @@ function showError(file, message) {
   clear(article);
   article.setAttribute('data-state', 'error');
   article.setAttribute('data-path', file.path);
-  article.appendChild(el('p', { id: 'wm-error', role: 'alert' }, 'Could not render ' + file.path + ': ' + String(message).replace(/\.$/, '') + '. Its raw text is below; save the file as UTF-8 and run waymark view again.'));
+  var p = el('p', { id: 'wm-error', role: 'alert' }, 'This file could not be rendered. Its raw text is below; save it as UTF-8 and run waymark view again.');
+  p.appendChild(el('span', { 'data-role': 'detail' }, String(message)));
+  article.appendChild(p);
   article.appendChild(el('pre', { id: 'wm-raw' }, file.raw || file.text));
+}
+function focusHeading(target) {
+  var h = target || article.querySelector('#wm-entry-header h1, #wm-body h1:not([aria-hidden]), h1, h2');
+  if (!h) { return; }
+  if (!h.hasAttribute('tabindex')) { h.setAttribute('tabindex', '-1'); }
+  h.focus({ preventScroll: true });
 }
 function scrollToEntry(id) {
   var t = id && document.getElementById('entry-' + id);
@@ -462,6 +515,7 @@ function scrollToEntry(id) {
   } else {
     window.scrollTo(0, 0);
   }
+  if (focusAfterRender) { focusAfterRender = false; focusHeading(t); }
 }
 function showFile(path, id) {
   var token = ++renderToken;
@@ -527,17 +581,31 @@ function route() {
 
 /* ------------------------------------------------------------ search --- */
 function openSearch() {
+  $('wm-search-backdrop').hidden = false;
   $('wm-search').hidden = false;
   $('wm-search-open').setAttribute('aria-expanded', 'true');
   var q = $('wm-q');
   q.focus();
   q.select();
 }
-function closeSearch() {
+// closeSearch(true): dismissed (Escape, Close, backdrop), focus goes back to Search;
+// closeSearch(): a result was chosen, focus follows the article once it renders
+function closeSearch(returnFocus) {
   clearTimeout(searchTimer);
   searchTimer = null;
   $('wm-search').hidden = true;
+  $('wm-search-backdrop').hidden = true;
   $('wm-search-open').setAttribute('aria-expanded', 'false');
+  if (returnFocus === true) { $('wm-search-open').focus(); } else { focusAfterRender = true; }
+}
+function trapTab(e) {
+  if (e.key !== 'Tab') { return; }
+  var list = Array.prototype.filter.call($('wm-search').querySelectorAll('input, button, a[href]'), function (n) { return n.getClientRects().length > 0; });
+  if (!list.length) { return; }
+  var i = list.indexOf(document.activeElement);
+  var next = e.shiftKey ? (i <= 0 ? list.length - 1 : i - 1) : (i < 0 || i >= list.length - 1 ? 0 : i + 1);
+  e.preventDefault();
+  list[next].focus();
 }
 function countOcc(hay, needle) {
   var c = 0;
@@ -617,7 +685,9 @@ function isEditable(t) {
 function bindUi() {
   $('wm-filter').addEventListener('input', renderTree);
   $('wm-search-open').addEventListener('click', openSearch);
-  $('wm-search-close').addEventListener('click', closeSearch);
+  $('wm-search-close').addEventListener('click', function () { closeSearch(true); });
+  $('wm-search-backdrop').addEventListener('click', function () { closeSearch(true); });
+  $('wm-search').addEventListener('keydown', trapTab);
   $('wm-nav-toggle').addEventListener('click', function () { setMenu(!$('wm-nav').hasAttribute('data-open')); });
   $('wm-q').addEventListener('input', function () {
     clearTimeout(searchTimer);
@@ -641,12 +711,21 @@ function bindUi() {
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !$('wm-search').hidden) { closeSearch(); $('wm-search-open').focus(); return; }
+    if (e.key === 'Escape' && !$('wm-search').hidden) { closeSearch(true); return; }
     if (e.key === 'Escape' && $('wm-nav').hasAttribute('data-open')) { setMenu(false); $('wm-nav-toggle').focus(); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openSearch(); return; }
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isEditable(e.target)) { e.preventDefault(); openSearch(); }
   });
-  window.addEventListener('hashchange', function () { setMenu(false); route(); });
+  window.addEventListener('hashchange', function () {
+    if ($('wm-nav').hasAttribute('data-open') && $('wm-nav').contains(document.activeElement)) { focusAfterRender = true; }
+    setMenu(false);
+    route();
+  });
+  if (window.matchMedia) {
+    var mq = window.matchMedia('(prefers-color-scheme: dark)');
+    var redraw = function () { if (article.querySelector('figure[data-mermaid]')) { route(); } };
+    if (mq.addEventListener) { mq.addEventListener('change', redraw); } else if (mq.addListener) { mq.addListener(redraw); }
+  }
 }
 
 function start() {
@@ -655,8 +734,8 @@ function start() {
   if (!files.length) {
     clear(article);
     article.setAttribute('data-state', 'empty');
-    article.appendChild(el('h1', null, 'Nothing here yet'));
-    article.appendChild(el('p', { id: 'wm-empty' }, 'No markdown files in this layer. Capture a gotcha or a decision in a session, then run waymark view again.'));
+    article.appendChild(el('h1', null, 'This snapshot holds no notes yet'));
+    article.appendChild(el('p', { id: 'wm-empty' }, 'Run a Claude Code session in a repo; waymark fills the layer with gotchas, decisions and docs, and the next snapshot shows them here.'));
     return;
   }
   renderTree();
