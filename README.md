@@ -43,7 +43,7 @@ Setup asks for your name and email, where the memory layer should live (default 
 - A failed Bash command becomes an inbox candidate (command, exit code, the first lines of output, repo), deduplicated per session.
 - A prompt containing "remember", "note that", "don't forget" or "for future" creates a mandatory candidate and tells Claude to record it before replying.
 - Files written or edited are tracked in the session's active file.
-- When Claude tries to stop with untriaged candidates, a gate blocks and asks it to record, dismiss or defer each one. An ordinary candidate gates at most once; a mandatory candidate keeps blocking until it is recorded, dismissed or deferred. Before a compaction, a gate also asks for a handoff note.
+- When Claude tries to stop with untriaged candidates, a gate blocks and asks it to record, dismiss or defer each one. An ordinary candidate gates at most once; a mandatory candidate keeps blocking until it is recorded, dismissed or deferred. After a compaction, the session-start hook that follows it asks Claude to triage and to write a handoff note. The pre-compaction hook only saves state and never blocks.
 - When a session ends, a worklog entry is written from facts (commits made, files touched, capture score, recall hits), the handoff is saved, and the layer is autosaved as `chore: autosave session <id8>`.
 
 **Recall.** At session start, waymark injects a capped briefing: the protocol, the repo and its tags, the previous handoff, playbook rules, up to 15 gotcha headings, other active sessions, and one-line warnings. The injection is limited to 6,000 bytes. When a Bash command fails and its output matches a recorded gotcha's `Match:` text, that gotcha (cause and fix) is injected immediately. When a command matches a playbook trigger, the playbook checklist is injected before it runs.
@@ -85,9 +85,9 @@ Skills:
 ## Privacy
 
 - The raw inbox (`inbox/`) is gitignored, so unreviewed command output never reaches git history.
-- Every commit to the layer passes `waymark scan`, via the pre-commit hook and through `waymark commit`. It checks `.md`, `.conf` and `.tsv` files and the CLI for credential-like patterns. A failing autosave commits nothing and writes its findings to `active/.scan-failed.log`, which is surfaced at the next session start.
+- Every commit to the layer passes `waymark scan`, via the pre-commit hook and through `waymark commit`. It checks every text file git would commit (the pre-commit hook checks the staged files) for credential-like patterns. Gitignored files such as `active/` and `inbox/` are never committed, so they are not scanned. A failing autosave commits nothing and writes its findings to `active/.scan-failed.log`, which is surfaced at the next session start.
 - Hooks never bypass verification or signing.
-- Nothing is sent anywhere. There is no network access at runtime.
+- Nothing is sent anywhere. There is no network access at runtime. The viewer snapshot carries a Content-Security-Policy that blocks every network request, so a remote image linked in a note is not fetched.
 
 ## Limitations
 
