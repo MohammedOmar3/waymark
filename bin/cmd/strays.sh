@@ -66,7 +66,7 @@ while IFS= read -r wm_sy_r; do
     wm_sy_name="${wm_sy_dir##*/}"
     wm_sy_rel="$( {
         git -C "$wm_sy_dir" -c core.quotepath=off ls-files 2>/dev/null | sed 's/^/T /'
-        ( cd "$wm_sy_dir" && find . \( \( -name node_modules -o -name .expo -o -name dist -o -name build -o -name .next -o -name vendor -o -name .venv -o -name target \) -o -path '*/ios/Pods' \) -type d -prune -o -name .git -print -prune -o -type f -name '*.md' -print 2>/dev/null | sed 's/^/F /' )
+        ( cd "$wm_sy_dir" && find . \( \( -name node_modules -o -name .expo -o -name dist -o -name build -o -name .next -o -name vendor -o -name .venv -o -name venv -o -name site-packages -o -name target \) -o -path '*/ios/Pods' \) -type d -prune -o -name .git -print -prune -o -type f -name '*.md' -print 2>/dev/null | sed 's/^/F /' )
       } | LC_ALL=C awk "$wm_sy_filter" )"
     while IFS= read -r wm_sy_p; do
       [ -n "$wm_sy_p" ] || continue
