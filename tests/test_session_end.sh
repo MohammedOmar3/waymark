@@ -189,6 +189,10 @@ test_session_end_background_autosave() {
   t_contains "$(<"$L/worklog.md")" "abcdef12" "worklog written by the background job"
   t_contains "$(git -C "$L" show HEAD:worklog.md)" "abcdef12" "worklog entry is in the autosave commit"
   t_eq "no" "$([ -e "$L/active/alpha--abcdef12.md" ] && echo yes || echo no)" "active file deleted by the background job"
+  # the viewer rebuild runs last in the job; let it finish before the sandbox is removed
+  i=0
+  while [ $i -lt 300 ] && [ ! -f "$L/.view/index.html" ]; do sleep 0.1; i=$((i + 1)); done
+  sleep 0.5
 }
 
 test_session_end_sync_part_is_parse_only() {
@@ -204,6 +208,9 @@ test_session_end_sync_part_is_parse_only() {
   local i=0
   while [ $i -lt 150 ] && [ -e "$L/active/alpha--abcdef12.md" ]; do sleep 0.1; i=$((i + 1)); done
   t_contains "$(<"$L/worklog.md")" "abcdef12" "background job finished the entry"
+  # let the job's autosave finish before the sandbox is removed
+  i=0
+  while [ $i -lt 150 ] && [ "$(git -C "$L" log -1 --format=%s)" != "chore: autosave session abcdef12" ]; do sleep 0.1; i=$((i + 1)); done
 }
 
 test_session_end_fresh_clone_no_active_dir() {
