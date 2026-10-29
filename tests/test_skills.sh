@@ -45,6 +45,7 @@ test_skills_pinned_specifics() {
   t_contains "$(cat "$f" 2>/dev/null)" "autoMemoryEnabled" "setup names the settings key"
   t_contains "$(cat "$WM_PLUGIN/skills/uninstall/SKILL.md" 2>/dev/null)" "archive" "uninstall offers archive"
   t_contains "$(cat "$WM_PLUGIN/skills/review/SKILL.md" 2>/dev/null)" "hooks/session-start" "review measures session-start"
+  t_contains "$(cat "$WM_PLUGIN/skills/review/SKILL.md" 2>/dev/null)" "projects/*/memory/" "review checks leftover auto-memory"
   if grep -qE 'git +push|remote add' "$WM_PLUGIN"/skills/*/SKILL.md 2>/dev/null \
      && ! grep -qiE 'never[^.]*(push|remote)' "$WM_PLUGIN"/skills/*/SKILL.md; then
     t__fail "skills must not push or add remotes"

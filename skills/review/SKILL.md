@@ -24,6 +24,7 @@ Run and keep the output:
    Report bytes against the 6,000-byte cap; over ~5,000 means propose trimming playbook rules, `repos/<repo>.md` or long gotchas.
 6. Worklog: if `worklog.md` has more than 30 entries, propose pruning to the newest 30 (show how many go).
 7. Version: compare `plugin_version=` in `<layer>/layer.conf` with `version` in `${CLAUDE_PLUGIN_ROOT}/.claude-plugin/plugin.json`. If the plugin is newer, show the exact copy (`${CLAUDE_PLUGIN_ROOT}/bin/` over `<layer>/bin/`, then update `plugin_version=`) and ask approval before touching `<layer>/bin/`.
+8. Old auto-memory: list files left under `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects/*/memory/` (project folder, name, size; skip `MEMORY.md` indexes). For each, read it and propose the matching `waymark record convention|decision|gotcha` (or "drop" when stale). Never move or delete the originals; say the user can remove them once recorded.
 
 ## Apply
 Present one numbered proposal list with exact diffs. Apply only the numbers the user approves, using Edit on the specific lines. Then run `"${CLAUDE_PLUGIN_ROOT}/bin/waymark" index` and `"${CLAUDE_PLUGIN_ROOT}/bin/waymark" commit "memory: review"`. On scan failure show the findings and stop.

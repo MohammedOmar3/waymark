@@ -163,7 +163,7 @@ test_strays_ignores_vendor() {
   local out W d
   W="$WM_SANDBOX_DIR/work"
   t_sy_repo "$W/app"
-  for d in node_modules/pkg .expo ios/Pods/Foo android/build dist build .next vendor/x .venv/lib target/doc; do
+  for d in node_modules/pkg .expo ios/Pods/Foo android/build dist build .next vendor/x .venv/lib backend/venv/Lib target/doc py/site-packages/pkg; do
     mkdir -p "$W/app/$d"
     printf '# vendor\n' > "$W/app/$d/V.md"
   done
