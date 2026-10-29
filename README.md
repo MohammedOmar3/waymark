@@ -14,10 +14,10 @@ Other memory tools for Claude Code tend to be automatic recall engines that need
 
 ## Install
 
-From the marketplace, once the repository is published (replace `<owner>` with its GitHub owner):
+From the marketplace:
 
 ```
-/plugin marketplace add <owner>/waymark
+/plugin marketplace add MohammedOmar3/waymark
 /plugin install waymark@waymark
 ```
 
