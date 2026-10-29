@@ -22,6 +22,7 @@ test_init_creates_tree() {
   t_eq "x@example.org" "$(wm_conf_get "$r/layer.conf" email_allowlist)" "conf allowlist"
   t_eq "/a,/b" "$(wm_conf_get "$r/layer.conf" repo_roots)" "conf repo_roots"
   t_eq "no" "$(wm_conf_get "$r/layer.conf" replace_auto_memory)" "conf replace_auto_memory"
+  t_eq "$WM_PLUGIN" "$(wm_conf_get "$r/layer.conf" plugin_root)" "conf plugin_root"
   for k in plugin_version created prior_auto_memory; do
     wm_conf_get "$r/layer.conf" "$k" >/dev/null
     t_eq 0 "$?" "conf has $k"

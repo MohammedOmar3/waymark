@@ -15,10 +15,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 wm_vw_layer="$(wm_layer_root)" || { printf 'waymark view: no layer found\n' >&2; exit 2; }
-wm_vw_plugin="${wm_here%/*}"
+# Plugin dir holding viewer/: next to this bin, else $CLAUDE_PLUGIN_ROOT, else
+# plugin_root in layer.conf (the layer's own bin/ copy has no viewer/ beside it).
+wm_vw_plugin=""
+for wm_vw_p in "${wm_here%/*}" "${CLAUDE_PLUGIN_ROOT:-}" "$(wm_conf_get "$wm_vw_layer/layer.conf" plugin_root 2>/dev/null)"; do
+  [ -n "$wm_vw_p" ] || continue
+  case "$wm_vw_p" in *'\'*|[A-Za-z]:*) wm_vw_p="$(wm_path "$wm_vw_p")" ;; esac
+  if [ -f "$wm_vw_p/viewer/template.html" ]; then wm_vw_plugin="$wm_vw_p"; break; fi
+done
+[ -n "$wm_vw_plugin" ] || { printf 'waymark view: viewer/template.html not found next to bin/, in $CLAUDE_PLUGIN_ROOT or at plugin_root in layer.conf\n' >&2; exit 2; }
 wm_vw_tpl="$wm_vw_plugin/viewer/template.html"
 wm_vw_vendor="$wm_vw_plugin/viewer/vendor"
-[ -f "$wm_vw_tpl" ] || { printf 'waymark view: missing template: %s\n' "$wm_vw_tpl" >&2; exit 2; }
 # Stylesheets inlined at <!--WAYMARK:CSS--> in this order (tokens first: it holds the Hallmark stamp).
 wm_vw_cssdir="$wm_vw_plugin/viewer"
 for wm_vw_c in tokens.css base.css viewer.css; do

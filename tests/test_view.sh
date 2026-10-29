@@ -200,6 +200,25 @@ test_view_failure_keeps_previous_snapshot() {
   t_eq "1" "$(ls "$d" | wc -l | tr -d ' ')" "no temp file left on failure"
 }
 
+test_view_from_layer_bin() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" d="$WM_SANDBOX_DIR/o" out rc
+  t_view_layer "$L"
+  mkdir -p "$d"
+  cp -R "$WM_PLUGIN/bin" "$L/"
+  out="$(WAYMARK_ROOT="$L" bash "$L/bin/waymark" view --no-open --out "$d/n.html" 2>&1)"; rc=$?
+  t_eq "2" "$rc" "layer bin without plugin_root exits 2"
+  t_contains "$out" "plugin_root" "error names plugin_root"
+  printf 'plugin_root=%s\n' "$WM_PLUGIN" >> "$L/layer.conf"
+  WAYMARK_ROOT="$L" bash "$L/bin/waymark" view --no-open --out "$d/c.html" >/dev/null 2>&1; rc=$?
+  t_eq "0" "$rc" "layer bin uses plugin_root from layer.conf"
+  t_file_exists "$d/c.html" "snapshot built via plugin_root"
+  sed -i.bak '/^plugin_root=/d' "$L/layer.conf"
+  CLAUDE_PLUGIN_ROOT="$WM_PLUGIN" WAYMARK_ROOT="$L" bash "$L/bin/waymark" view --no-open --out "$d/e.html" >/dev/null 2>&1; rc=$?
+  t_eq "0" "$rc" "layer bin uses CLAUDE_PLUGIN_ROOT"
+  t_file_exists "$d/e.html" "snapshot built via CLAUDE_PLUGIN_ROOT"
+}
+
 test_view_no_heredoc() {
   t_eq "0" "$(grep -c '<<' "$WM_PLUGIN/bin/cmd/view.sh")" "view.sh has no heredoc"
 }
