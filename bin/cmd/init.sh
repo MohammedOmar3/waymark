@@ -42,7 +42,7 @@ case "$wm_i_email" in *@*) ;; *) wm_i_die "owner email must contain @: $wm_i_ema
 command -v git >/dev/null 2>&1 || wm_i_die "git is required but was not found"
 
 wm_i_root="$(wm_path "$wm_i_root")"
-[ -n "$wm_i_plugin" ] || wm_i_plugin="$wm_here/.."
+[ -n "$wm_i_plugin" ] || wm_i_plugin="${wm_here%/*}"
 wm_i_plugin="$(wm_path "$wm_i_plugin")"
 [ -d "$wm_i_plugin/templates/layer" ] || wm_i_die "templates not found under $wm_i_plugin"
 [ -f "$wm_i_plugin/bin/waymark" ] || wm_i_die "plugin bin not found under $wm_i_plugin"
@@ -124,6 +124,7 @@ fi
   wm_conf_set "$wm_i_root/layer.conf" email_allowlist "$wm_i_allow" &&
   wm_conf_set "$wm_i_root/layer.conf" repo_roots "$wm_i_repo_roots" &&
   wm_conf_set "$wm_i_root/layer.conf" plugin_version "$wm_i_ver" &&
+  wm_conf_set "$wm_i_root/layer.conf" plugin_root "$wm_i_plugin" &&
   wm_conf_set "$wm_i_root/layer.conf" replace_auto_memory "$wm_i_replace"
 } || wm_i_abort "cannot write layer.conf"
 
