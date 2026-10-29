@@ -27,6 +27,9 @@ for wm_vw_c in tokens.css base.css viewer.css; do
     printf 'waymark view: stylesheet must not contain </style: %s\n' "$wm_vw_c" >&2; exit 2
   fi
 done
+for wm_vw_c in marked purify mermaid; do
+  [ -r "$wm_vw_vendor/$wm_vw_c.min.js" ] || { printf 'waymark view: missing vendor file: %s.min.js\n' "$wm_vw_c" >&2; exit 2; }
+done
 
 if [ "$wm_vw_outset" = 1 ] && [ -z "$wm_vw_out" ]; then
   printf 'waymark view: --out needs a non-empty file name\n' >&2; exit 64
@@ -57,7 +60,13 @@ wm_vw_tmp="$wm_vw_out.tmp.$$"
 trap 'rm -f "$wm_vw_tmp"' EXIT
 
 # wm_vw_b64 <file>: one-line base64 of a file's bytes (GNU wraps, BSD does not)
-wm_vw_b64() { base64 < "$1" | tr -d '\n'; }
+# Fails (and sets wm_vw_err) when the file cannot be read or encoded.
+wm_vw_b64() {
+  local st
+  base64 < "$1" | tr -d '\n'
+  st="${PIPESTATUS[0]}${PIPESTATUS[1]}"
+  [ "$st" = 00 ] || { wm_vw_err=1; return 1; }
+}
 
 # wm_vw_attr <string>: escape for a double-quoted HTML attribute
 wm_vw_attr() {
@@ -74,6 +83,9 @@ wm_vw_list="$(cd "$wm_vw_layer" && LC_ALL=C find . \
   \( -name .git -o -name .view -o -path ./inbox -o -path ./active \) -prune -o \
   -type f -name '*.md' -print | LC_ALL=C sed 's|^\./||' | LC_ALL=C sort)"
 
+# Any failure inside the build (unreadable file, base64, cat) sets wm_vw_err;
+# then the temp file is discarded and the previous snapshot stays.
+wm_vw_err=0
 : > "$wm_vw_tmp" || exit 2
 {
   while IFS= read -r wm_vw_line || [ -n "$wm_vw_line" ]; do
@@ -86,14 +98,12 @@ wm_vw_list="$(cd "$wm_vw_layer" && LC_ALL=C find . \
               "$(wm_vw_attr "$wm_vw_rel")" "${wm_vw_mt:-0}"
             wm_vw_b64 "$wm_vw_layer/$wm_vw_rel"
             printf '</script>\n'
-          done <<EOF
-$wm_vw_list
-EOF
+          done < <(printf '%s\n' "$wm_vw_list")
         fi
         ;;
       '<!--WAYMARK:CSS-->')
         printf '<style>\n'
-        cat "$wm_vw_cssdir/tokens.css" "$wm_vw_cssdir/base.css" "$wm_vw_cssdir/viewer.css"
+        cat "$wm_vw_cssdir/tokens.css" "$wm_vw_cssdir/base.css" "$wm_vw_cssdir/viewer.css" || wm_vw_err=1
         printf '</style>\n'
         ;;
       '<!--WAYMARK:VENDOR-->')
@@ -107,7 +117,8 @@ EOF
       *) printf '%s\n' "$wm_vw_line" ;;
     esac
   done < "$wm_vw_tpl"
-} >> "$wm_vw_tmp" || { printf 'waymark view: build failed\n' >&2; exit 2; }
+} >> "$wm_vw_tmp" || wm_vw_err=1
+[ "$wm_vw_err" = 0 ] || { printf 'waymark view: build failed; previous snapshot kept\n' >&2; exit 2; }
 
 mv -f "$wm_vw_tmp" "$wm_vw_out" || { printf 'waymark view: cannot write %s\n' "$wm_vw_out" >&2; exit 2; }
 printf '%s\n' "$wm_vw_out"

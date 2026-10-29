@@ -185,3 +185,35 @@ test_view_inlines_css() {
   t_eq "0" "$(grep -ci '<link[^>]*rel=["'"'"']\{0,1\}stylesheet' "$out")" "no stylesheet link"
   t_eq "1" "$(awk '/^<style>$/ { on = 1; next } /^<\/style>$/ { on = 0 } on && /--color-paper:/ { n = 1 } END { print n + 0 }' "$out")" "tokens inlined inside <style>"
 }
+
+test_view_failure_keeps_previous_snapshot() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" P="$WM_SANDBOX_DIR/plugin" d="$WM_SANDBOX_DIR/o" rc
+  t_view_layer "$L"
+  mkdir -p "$P" "$d"
+  cp -R "$WM_PLUGIN/bin" "$WM_PLUGIN/viewer" "$P/"
+  rm -f "$P/viewer/vendor/mermaid.min.js"
+  printf 'previous\n' > "$d/v.html"
+  WAYMARK_ROOT="$L" bash "$P/bin/waymark" view --no-open --out "$d/v.html" >/dev/null 2>&1; rc=$?
+  t_eq "2" "$rc" "missing vendor file exits 2"
+  t_eq "previous" "$(cat "$d/v.html")" "previous snapshot untouched"
+  t_eq "1" "$(ls "$d" | wc -l | tr -d ' ')" "no temp file left on failure"
+}
+
+test_view_no_heredoc() {
+  t_eq "0" "$(grep -c '<<' "$WM_PLUGIN/bin/cmd/view.sh")" "view.sh has no heredoc"
+}
+
+test_view_csp_blocks_network() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" out="$WM_SANDBOX_DIR/v.html"
+  t_view_layer "$L"
+  t_view_build "$L" "$out" >/dev/null
+  t_contains "$(cat "$out")" "<meta http-equiv=\"Content-Security-Policy\" content=\"default-src 'none'; script-src 'unsafe-inline' blob:; style-src 'unsafe-inline'; img-src data: blob:; font-src data:\">" "CSP meta present"
+}
+
+test_view_noscript_hides_nav() {
+  t_contains "$(cat "$WM_PLUGIN/viewer/viewer.css")" "html:not(.js) #wm-nav," "nav hidden without scripting"
+  t_contains "$(cat "$WM_PLUGIN/viewer/viewer.css")" "html:not(.js) #wm-layout { grid-template-columns: minmax(0, 1fr); }" "single column without scripting"
+  t_eq "1" "$(grep -c '^#wm-search {' "$WM_PLUGIN/viewer/viewer.css")" "one #wm-search rule"
+}

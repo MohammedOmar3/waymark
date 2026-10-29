@@ -131,12 +131,12 @@ kbd { font-family: var(--font-mono); font-size: var(--text-xs); padding: 0 var(-
 #wm-noscript { max-width: 48ch; padding-top: var(--space-md); border-top: var(--rule-heavy) solid var(--color-ink); font-size: var(--text-lg); color: var(--color-ink); }
 #wm-error [data-role="detail"] { display: block; margin-top: var(--space-xs); font-size: var(--text-sm); color: var(--color-muted); }
 /* scripting off: the notice replaces the article, and controls that cannot work are hidden */
-html:not(.js) #wm-article, html:not(.js) #wm-search-open, html:not(.js) #wm-nav-toggle, html:not(.js) #wm-filter, html:not(.js) #wm-nav > label { display: none; }
+html:not(.js) #wm-article, html:not(.js) #wm-search-open, html:not(.js) #wm-nav-toggle, html:not(.js) #wm-filter, html:not(.js) #wm-nav, html:not(.js) #wm-nav > label { display: none; }
+html:not(.js) #wm-layout { grid-template-columns: minmax(0, 1fr); }
 
 /* ---- search: a command panel over the page -------------------------- */
-#wm-search { position: fixed; top: calc(var(--bar) + var(--space-md)); left: 0; right: 0; z-index: var(--z-modal); display: flex; flex-direction: column; width: min(44rem, calc(100% - 2 * var(--space-md))); max-height: calc(100dvh - var(--bar) - var(--space-2xl)); margin-inline: auto; background: var(--color-paper); border: var(--rule-hair) solid var(--color-ink); border-top: var(--rule-heavy) solid var(--color-ink); }
+#wm-search { position: fixed; top: calc(var(--bar) + var(--space-md)); left: 0; right: 0; z-index: calc(var(--z-modal) + 1); display: flex; flex-direction: column; width: min(44rem, calc(100% - 2 * var(--space-md))); max-height: calc(100dvh - var(--bar) - var(--space-2xl)); margin-inline: auto; background: var(--color-paper); border: var(--rule-hair) solid var(--color-ink); border-top: var(--rule-heavy) solid var(--color-ink); }
 #wm-search-backdrop { position: fixed; inset: 0; z-index: var(--z-modal); background: var(--color-scrim); cursor: default; }
-#wm-search { z-index: calc(var(--z-modal) + 1); }
 #wm-search-bar { display: grid; grid-template-columns: minmax(0, 1fr) auto; column-gap: var(--space-xs); padding: var(--space-md) var(--space-md) var(--space-sm); }
 #wm-search-bar > label { grid-column: 1 / -1; }
 #wm-search-close { min-height: var(--control); }
