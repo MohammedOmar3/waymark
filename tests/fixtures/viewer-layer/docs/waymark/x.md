@@ -18,3 +18,5 @@ graph TD
 ```
 
 See the [decisions](../../decisions.md) file and gotcha G-0001.
+
+Contents: [top](#waymark-design-notes), [missing page](nowhere.md), [escape](../../../../x.md).

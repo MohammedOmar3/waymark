@@ -42,6 +42,7 @@ var renderToken = 0;
 var pendingHighlight = null;
 var mermaidPromise = null;
 var mermaidCount = 0;
+var searchTimer = null;
 var FOLDER_KEY = 'waymark.view.closedFolders';
 
 var $ = function (id) { return document.getElementById(id); };
@@ -81,7 +82,7 @@ function resolvePath(base, rel) {
   var parts = base ? base.split('/') : [];
   var segs = rel.split('/');
   for (var i = 0; i < segs.length; i++) {
-    if (segs[i] === '..') { parts.pop(); } else if (segs[i] !== '.' && segs[i] !== '') { parts.push(segs[i]); }
+    if (segs[i] === '..') { if (!parts.length) { return null; } parts.pop(); } else if (segs[i] !== '.' && segs[i] !== '') { parts.push(segs[i]); }
   }
   return parts.join('/');
 }
@@ -112,7 +113,7 @@ function loadMermaid() {
 
 /* ------------------------------------------------------------ data ----- */
 function parseFrontmatter(text) {
-  var norm = text.replace(/^﻿/, '').replace(/\r\n?/g, '\n');
+  var norm = text.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n');
   var m = /^---[ \t]*\n([\s\S]*?)\n---[ \t]*(?:\n|$)/.exec(norm);
   if (!m) { return { fm: null, body: norm }; }
   var fm = {};
@@ -144,6 +145,8 @@ function loadFiles() {
     var h1 = /^#[ \t]+(.+?)[ \t]*$/m.exec(p.body);
     f.title = (p.fm && p.fm.title) || (h1 && h1[1]) || f.path.split('/').pop();
     f.lower = f.text.toLowerCase();
+    f.flat = f.text.replace(/\s+/g, ' ');
+    f.flatLower = f.flat.toLowerCase();
     f.titleLower = f.title.toLowerCase();
     files.push(f);
     byPath[f.path] = f;
@@ -295,7 +298,14 @@ function fixLinks(root, file) {
   for (var i = 0; i < links.length; i++) {
     var a = links[i];
     var href = a.getAttribute('href');
-    if (/^#/.test(href) || a.hasAttribute('data-entry-link')) { continue; }
+    if (a.hasAttribute('data-entry-link')) { continue; }
+    if (/^#/.test(href)) {
+      var af = href.slice(1);
+      try { af = decodeURIComponent(af); } catch (e) { /* keep raw */ }
+      a.setAttribute('href', hashFor(file.path, ID_RE.test(af) ? af : ''));
+      if (!ID_RE.test(af)) { a.setAttribute('data-anchor', af); }
+      continue;
+    }
     if (/^[A-Za-z][A-Za-z0-9+.-]*:/.test(href)) {
       if (/^https?:/i.test(href)) { a.setAttribute('rel', 'noopener noreferrer'); a.setAttribute('target', '_blank'); }
       continue;
@@ -305,7 +315,14 @@ function fixLinks(root, file) {
     try { rel = decodeURIComponent(rel); } catch (e) { /* keep raw */ }
     if (!/\.md$/i.test(rel)) { continue; }
     var target = resolvePath(dirOf(file.path), rel);
-    if (byPath[target]) {
+    if (target === null) { continue; }
+    if (!byPath[target]) {
+      a.removeAttribute('href');
+      a.setAttribute('data-missing', target);
+      a.setAttribute('title', 'Not in this snapshot: ' + target);
+      continue;
+    }
+    {
       var frag = pm && pm[2] ? pm[2] : '';
       a.setAttribute('href', hashFor(target, ID_RE.test(frag) ? frag : ''));
       a.setAttribute('data-internal', target);
@@ -313,10 +330,13 @@ function fixLinks(root, file) {
   }
 }
 function markEntryHeadings(root) {
+  var slugs = {};
   var hs = root.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (var i = 0; i < hs.length; i++) {
     var m = /^([GDC]-\d{4})\b/.exec(hs[i].textContent.trim());
     if (m) { hs[i].setAttribute('data-entry', m[1]); hs[i].id = 'entry-' + m[1]; }
+    var slug = hs[i].textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
+    if (slug && !slugs[slug]) { slugs[slug] = 1; hs[i].setAttribute('data-slug', slug); }
   }
 }
 function renderMermaid(root, token) {
@@ -394,6 +414,7 @@ function showFile(path, id) {
   if (!file) {
     clear(article);
     article.setAttribute('data-state', 'error');
+    article.removeAttribute('data-path');
     article.appendChild(el('p', { id: 'wm-error', role: 'alert' }, 'Not found in this snapshot: ' + path));
     return;
   }
@@ -461,8 +482,8 @@ function countOcc(hay, needle) {
   return c;
 }
 function snippetFor(file, words) {
-  var flat = file.text.replace(/\s+/g, ' ');
-  var low = flat.toLowerCase();
+  var flat = file.flat;
+  var low = file.flatLower;
   var at = -1;
   for (var i = 0; i < words.length; i++) {
     var p = low.indexOf(words[i]);
@@ -529,9 +550,23 @@ function bindUi() {
   $('wm-filter').addEventListener('input', renderTree);
   $('wm-search-open').addEventListener('click', openSearch);
   $('wm-search-close').addEventListener('click', closeSearch);
-  $('wm-q').addEventListener('input', onSearchInput);
+  $('wm-q').addEventListener('input', function () {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(onSearchInput, 120);
+  });
+  article.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a[data-anchor]');
+    if (!a) { return; }
+    e.preventDefault();
+    var want = a.getAttribute('data-anchor').toLowerCase();
+    var hs = document.querySelectorAll('#wm-body [data-slug]');
+    for (var i = 0; i < hs.length; i++) {
+      if (hs[i].getAttribute('data-slug') === want) { hs[i].scrollIntoView(); break; }
+    }
+  });
   $('wm-q').addEventListener('keydown', function (e) {
     if (e.key === 'Enter') {
+      clearTimeout(searchTimer); onSearchInput();
       var first = $('wm-results').querySelector('a');
       if (first) { pendingHighlight = $('wm-q').value.trim().toLowerCase().split(/\s+/); closeSearch(); location.hash = first.getAttribute('href'); }
     }

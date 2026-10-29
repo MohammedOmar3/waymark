@@ -5,11 +5,12 @@
 
 wm_vw_open=1
 wm_vw_out=""
+wm_vw_outset=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-open) wm_vw_open=0; shift ;;
-    --out) wm_vw_out="${2:-}"; [ $# -ge 2 ] || { printf 'waymark view: --out needs a file\n' >&2; exit 64; }; shift 2 ;;
-    --out=*) wm_vw_out="${1#--out=}"; shift ;;
+    --out) wm_vw_out="${2:-}"; wm_vw_outset=1; [ $# -ge 2 ] || { printf 'waymark view: --out needs a file\n' >&2; exit 64; }; shift 2 ;;
+    --out=*) wm_vw_out="${1#--out=}"; wm_vw_outset=1; shift ;;
     *) printf 'waymark view: unknown argument: %s\n' "$1" >&2; exit 64 ;;
   esac
 done
@@ -19,10 +20,26 @@ wm_vw_tpl="$wm_vw_plugin/viewer/template.html"
 wm_vw_vendor="$wm_vw_plugin/viewer/vendor"
 [ -f "$wm_vw_tpl" ] || { printf 'waymark view: missing template: %s\n' "$wm_vw_tpl" >&2; exit 2; }
 
+if [ "$wm_vw_outset" = 1 ] && [ -z "$wm_vw_out" ]; then
+  printf 'waymark view: --out needs a non-empty file name\n' >&2; exit 64
+fi
 if [ -z "$wm_vw_out" ]; then
   wm_vw_out="$wm_vw_layer/.view/index.html"
 else
   case "$wm_vw_out" in *'\'*|[A-Za-z]:*) wm_vw_out="$(wm_path "$wm_vw_out")" ;; esac
+  if [ -d "$wm_vw_out" ]; then
+    printf 'waymark view: --out is a directory: %s\n' "$wm_vw_out" >&2; exit 64
+  fi
+fi
+
+# Keep snapshots out of the layer's commits (older layers may lack the entry).
+if [ -f "$wm_vw_layer/.gitignore" ] &&
+   ! grep -qx '/\{0,1\}\.view/\{0,1\}[[:space:]]*' "$wm_vw_layer/.gitignore" 2>/dev/null; then
+  if [ -n "$(tail -c 1 "$wm_vw_layer/.gitignore" 2>/dev/null)" ]; then
+    printf '\n.view/\n' >> "$wm_vw_layer/.gitignore"
+  else
+    printf '.view/\n' >> "$wm_vw_layer/.gitignore"
+  fi
 fi
 wm_vw_odir="$(dirname "$wm_vw_out")"
 mkdir -p "$wm_vw_odir" 2>/dev/null || { printf 'waymark view: cannot create %s\n' "$wm_vw_odir" >&2; exit 2; }
@@ -46,7 +63,7 @@ wm_vw_attr() {
 
 wm_vw_stamp="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 wm_vw_list="$(cd "$wm_vw_layer" && LC_ALL=C find . \
-  \( -path ./.git -o -path ./inbox -o -path ./.view -o -path ./active \) -prune -o \
+  \( -name .git -o -name .view -o -path ./inbox -o -path ./active \) -prune -o \
   -type f -name '*.md' -print | LC_ALL=C sed 's|^\./||' | LC_ALL=C sort)"
 
 : > "$wm_vw_tmp" || exit 2

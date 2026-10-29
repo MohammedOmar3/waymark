@@ -69,7 +69,8 @@ se_background() {
     2) se_log "$layer" "autosave refused: scan failed (see active/.scan-failed.log)" ;;
     *) se_log "$layer" "autosave failed (rc $rc)" ;;
   esac
-  if [ -f "$se_plugin/bin/cmd/view.sh" ]; then
+  # WAYMARK_SESSION_END_NO_VIEW=1 is a test-only switch that skips the rebuild
+  if [ "${WAYMARK_SESSION_END_NO_VIEW:-}" != 1 ] && [ -f "$se_plugin/bin/cmd/view.sh" ]; then
     bash "$se_plugin/bin/waymark" view --no-open >/dev/null 2>&1 || se_log "$layer" "viewer rebuild failed"
   fi
   return 0

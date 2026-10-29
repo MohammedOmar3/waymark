@@ -7,7 +7,11 @@ t_view_b64d() { base64 -d 2>/dev/null || base64 -D; }
 # t_view_layer <dir>: copy of the fixture plus files that must be excluded
 t_view_layer() {
   cp -R "$WM_REPO_ROOT/tests/fixtures/viewer-layer" "$1" || return 1
-  mkdir -p "$1/active" "$1/inbox" "$1/.view" "$1/.git" "$1/docs/with space"
+  mkdir -p "$1/active" "$1/inbox" "$1/.view" "$1/.git" "$1/docs/with space" "$1/docs/vendored/.git" "$1/docs/sub/.view"
+  printf '# nested git
+' > "$1/docs/vendored/.git/x.md"
+  printf '# nested view
+' > "$1/docs/sub/.view/y.md"
   printf '# active\n' > "$1/active/s1.md"
   printf '# inbox\n' > "$1/inbox/i1.md"
   printf '# old view\n' > "$1/.view/old.md"
@@ -30,7 +34,7 @@ test_view_embeds_every_file() {
   local L="$WM_SANDBOX_DIR/l" out="$WM_SANDBOX_DIR/v.html" want got
   t_view_layer "$L"
   t_view_build "$L" "$out" >/dev/null
-  want="$(cd "$L" && find . \( -path ./.git -o -path ./inbox -o -path ./.view -o -path ./active \) -prune -o -type f -name '*.md' -print | wc -l | tr -d ' ')"
+  want="$(cd "$L" && find . \( -name .git -o -name .view -o -path ./inbox -o -path ./active \) -prune -o -type f -name '*.md' -print | wc -l | tr -d ' ')"
   got="$(t_view_blocks "$out" | wc -l | tr -d ' ')"
   t_eq "$want" "$got" "every md file embedded"
   t_eq "7" "$got" "fixture has seven files"
@@ -39,6 +43,8 @@ test_view_embeds_every_file() {
   t_not_contains "$(cat "$out")" 'data-path=".view/' "no .view file"
   t_not_contains "$(cat "$out")" 'data-path=".git/' "no .git file"
   t_contains "$(cat "$out")" 'data-path="docs/waymark/x.md"' "nested doc embedded"
+  t_not_contains "$(cat "$out")" 'vendored/.git' "nested .git excluded"
+  t_not_contains "$(cat "$out")" 'sub/.view' "nested .view excluded"
 }
 
 test_view_roundtrip_exact() {
@@ -134,4 +140,35 @@ test_view_default_output() {
   t_eq "0" "$rc" "no-open exits 0"
   t_contains "$out" ".view/index.html" "prints the path"
   t_file_exists "$L/.view/index.html" "default output written"
+}
+
+test_view_out_validation() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" rc msg
+  t_view_layer "$L"
+  msg="$(WAYMARK_ROOT="$L" bash "$WM_PLUGIN/bin/waymark" view --no-open --out "" 2>&1)"; rc=$?
+  t_eq "64" "$rc" "empty --out exits 64"
+  t_contains "$msg" "non-empty" "empty --out message"
+  mkdir -p "$WM_SANDBOX_DIR/adir"
+  msg="$(WAYMARK_ROOT="$L" bash "$WM_PLUGIN/bin/waymark" view --no-open --out "$WM_SANDBOX_DIR/adir" 2>&1)"; rc=$?
+  t_eq "64" "$rc" "directory --out exits 64"
+  t_contains "$msg" "is a directory" "directory --out message"
+  t_eq "0" "$(ls "$WM_SANDBOX_DIR/adir" | wc -l | tr -d ' ')" "nothing written into the directory"
+}
+
+test_view_gitignore_guard() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l"
+  t_view_layer "$L"
+  printf 'active/
+.locks/' > "$L/.gitignore"
+  t_view_build "$L" "$WM_SANDBOX_DIR/v.html" >/dev/null
+  t_eq "active/
+.locks/
+.view/" "$(cat "$L/.gitignore")" ".view/ appended after a missing final newline"
+  t_view_build "$L" "$WM_SANDBOX_DIR/v.html" >/dev/null
+  t_eq "1" "$(grep -c '^.view/$' "$L/.gitignore")" "not appended twice"
+  rm -f "$L/.gitignore"
+  t_view_build "$L" "$WM_SANDBOX_DIR/v.html" >/dev/null
+  t_eq "no" "$([ -e "$L/.gitignore" ] && echo yes || echo no)" "no .gitignore is not created"
 }

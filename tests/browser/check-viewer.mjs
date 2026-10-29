@@ -92,6 +92,7 @@ async function key(k) {
 }
 async function typeQuery(q) {
   await ev(`(() => { const i = document.getElementById('wm-q'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(350); // search input is debounced
 }
 
 let failed = 0;
@@ -153,6 +154,16 @@ try {
   await ev(`location.hash = '#docs/crlf.md'`);
   await until(`document.getElementById('wm-article').dataset.path === 'docs/crlf.md'`);
   report(await ev(`document.getElementById('wm-body').innerText.includes('Crlf file') && document.querySelector('#wm-entry-header h1').textContent === 'Crlf'`), 'CRLF file renders with frontmatter');
+
+  // same-page anchor, missing and escaping links
+  await ev(`location.hash = '#docs/waymark/x.md'`);
+  await until(`document.querySelector('#wm-body a[data-anchor]')`);
+  const anc = await ev(`(() => { const a = document.querySelector('#wm-body a[data-anchor]'); a.click();
+    return { path: document.getElementById('wm-article').dataset.path, hash: decodeURIComponent(location.hash), err: !!document.getElementById('wm-error') }; })()`);
+  report(anc.path === 'docs/waymark/x.md' && anc.hash === '#docs/waymark/x.md' && !anc.err, 'same-page #section link keeps the article', JSON.stringify(anc));
+  const miss = await ev(`({ missing: !!document.querySelector('#wm-body a[data-missing="docs/waymark/nowhere.md"]:not([href])'),
+    escape: document.querySelector('#wm-body a[href="../../../../x.md"]') !== null && !document.querySelector('#wm-body a[href="../../../../x.md"][data-internal]') })`);
+  report(miss.missing && miss.escape, 'missing .md link marked, underflowing link left alone', JSON.stringify(miss));
 
   // 7. link between files, 8. back button
   await ev(`location.hash = '#docs/waymark/x.md'`);

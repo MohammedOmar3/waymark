@@ -31,7 +31,7 @@ t_se_active() {
 
 # t_se_run [cwd]: fire the hook synchronously (autosave in the foreground)
 t_se_run() {
-  t_hook_json SessionEnd session_id="$SID" cwd="${1:-$R}" reason=other | WAYMARK_SESSION_END_SYNC=1 bash "$WM_PLUGIN/hooks/session-end"
+  t_hook_json SessionEnd session_id="$SID" cwd="${1:-$R}" reason=other | WAYMARK_SESSION_END_SYNC=1 WAYMARK_SESSION_END_NO_VIEW="$([ -n "${WM_SE_VIEW:-}" ] && echo 0 || echo 1)" bash "$WM_PLUGIN/hooks/session-end"
 }
 
 t_se_commit() { # <msg>
@@ -206,4 +206,12 @@ test_session_end_ampersand_repo_name() {
   local c; c="$(<"$L/repos/a&b.md")"
   t_contains "$c" "a&b" "repo name kept literal"
   t_not_contains "$c" "<repo>" "placeholder substituted"
+}
+
+test_viewer_built_after_session_end() {
+  t_se_setup
+  t_se_active alpha "t" "" "h"
+  WM_SE_VIEW=1 t_se_run
+  t_file_exists "$L/.view/index.html" "viewer built by session end"
+  t_eq "" "$(git -C "$L" status --porcelain)" "layer clean with viewer built"
 }
