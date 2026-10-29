@@ -305,9 +305,32 @@ test_guard_internal_failure() {
   t_ss_setup
   mkdir -p "$P"
   cp -r "$WM_PLUGIN/hooks" "$WM_PLUGIN/bin" "$WM_PLUGIN/templates" "$P/"
-  sed -i 's|^  layer="\$WM_LAYER"$|&; set -e; false; exit 7|' "$P/hooks/session-start"
+  sed 's|^  layer="\$WM_LAYER"$|&; set -e; false; exit 7|' "$P/hooks/session-start" > "$P/ss.tmp" && mv "$P/ss.tmp" "$P/hooks/session-start"
+  t_contains "$(<"$P/hooks/session-start")" 'layer="$WM_LAYER"; set -e; false; exit 7' "failure injected into the hook copy"
   raw="$(t_hook_json SessionStart session_id=abcdef1234 cwd="$R" source=startup | bash "$P/hooks/session-start")"; rc=$?
   t_eq "0" "$rc" "exit 0 on internal failure"
   case "$raw" in '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":"'*'"}}') t__pass "valid json on internal failure" ;; *) t__fail "valid json on internal failure" "$raw" ;; esac
   t_contains "$raw" "session: abcdef12" "names the session"
+}
+
+test_resume_and_fork_registered() {
+  t_contains "$(<"$WM_PLUGIN/hooks/hooks.json")" '"matcher": "startup|resume|clear|compact|fork"' "SessionStart matcher covers resume and fork"
+}
+
+test_resume_creates_missing_active_file() {
+  t_ss_setup
+  t_ss_ctx resume
+  local f="$L/active/alpha--abcdef12.md"
+  t_file_exists "$f" "resume creates the active file"
+  t_contains "$(cat "$f" 2>/dev/null)" "started: 20" "started stamped"
+  t_contains "$CTX" "session: abcdef12" "identity injected on resume"
+}
+
+test_resume_keeps_existing_active_file() {
+  t_ss_setup
+  local f="$L/active/alpha--abcdef12.md"
+  printf 'repo: alpha\nsession: abcdef12\nstarted: 2025-01-01T00:00:00\ntask: keep me\nstatus: working\nfiles touched: a.ts\nhandoff:\n' > "$f"
+  t_ss_ctx resume
+  t_contains "$(cat "$f")" "task: keep me" "existing task kept"
+  t_contains "$(cat "$f")" "started: 2025-01-01T00:00:00" "existing start kept"
 }

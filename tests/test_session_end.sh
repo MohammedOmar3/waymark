@@ -178,14 +178,32 @@ test_session_end_background_autosave() {
   local out
   out="$(t_hook_json SessionEnd session_id="$SID" cwd="$R" reason=other | bash "$WM_PLUGIN/hooks/session-end" 2>&1)"
   t_eq "" "$out" "silent"
-  t_contains "$(<"$L/worklog.md")" "abcdef12" "worklog written synchronously"
+  # all of the work runs in the detached job: worklog, handoff, delete, autosave
   local i=0 subj=""
-  while [ $i -lt 100 ]; do
+  while [ $i -lt 150 ]; do
     subj="$(git -C "$L" log -1 --format=%s)"
     [ "$subj" = "chore: autosave session abcdef12" ] && break
     sleep 0.1; i=$((i + 1))
   done
   t_eq "chore: autosave session abcdef12" "$subj" "background autosave landed"
+  t_contains "$(<"$L/worklog.md")" "abcdef12" "worklog written by the background job"
+  t_contains "$(git -C "$L" show HEAD:worklog.md)" "abcdef12" "worklog entry is in the autosave commit"
+  t_eq "no" "$([ -e "$L/active/alpha--abcdef12.md" ] && echo yes || echo no)" "active file deleted by the background job"
+}
+
+test_session_end_sync_part_is_parse_only() {
+  t_se_setup
+  t_se_active alpha "t" "" "h"
+  # a hook that returns while the job is still waiting on the active lock
+  # proves the worklog/delete work is not on the synchronous path
+  mkdir -p "$L/.locks/active-abcdef12"
+  t_hook_json SessionEnd session_id="$SID" cwd="$R" reason=other | WAYMARK_SESSION_END_NO_VIEW=1 bash "$WM_PLUGIN/hooks/session-end"
+  t_eq "no" "$(grep -q abcdef12 "$L/worklog.md" && echo yes || echo no)" "hook returned before the worklog write"
+  t_file_exists "$L/active/alpha--abcdef12.md" "active file still there when the hook returns"
+  rmdir "$L/.locks/active-abcdef12"
+  local i=0
+  while [ $i -lt 150 ] && [ -e "$L/active/alpha--abcdef12.md" ]; do sleep 0.1; i=$((i + 1)); done
+  t_contains "$(<"$L/worklog.md")" "abcdef12" "background job finished the entry"
 }
 
 test_session_end_fresh_clone_no_active_dir() {
@@ -214,4 +232,16 @@ test_viewer_built_after_session_end() {
   WM_SE_VIEW=1 t_se_run
   t_file_exists "$L/.view/index.html" "viewer built by session end"
   t_eq "" "$(git -C "$L" status --porcelain)" "layer clean with viewer built"
+}
+
+test_session_end_resumed_session_gets_own_entry() {
+  t_se_setup
+  t_se_active alpha "first part" "" "h1"
+  t_se_run
+  STARTED="2025-02-01T00:00:00"
+  t_se_active alpha "second part" "" "h2"
+  t_se_run
+  local n; n="$(grep -c -F -e '- **Session:** abcdef12,' "$L/worklog.md")"
+  t_eq 2 "$n" "resumed session (same id, new start) gets a second entry"
+  t_contains "$(<"$L/worklog.md")" " — alpha — second part" "second entry written"
 }

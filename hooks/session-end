@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # waymark SessionEnd hook (spec section 8, rulings R6/R16/R18).
-# Synchronously: append this session's worklog entry (once per id8), copy the
-# handoff into repos/<repo>.md, delete the session's active file. Then the
-# autosave commit and the viewer rebuild run as one detached background job
-# (WAYMARK_SESSION_END_SYNC=1 runs it in the foreground, for tests).
+# The SessionEnd budget is 1.5 s on every platform, so only the stdin parse
+# (session id, cwd) and the layer lookup run synchronously. One detached job
+# then, in order: appends this session's worklog entry (once per session id
+# and start time), copies the handoff into repos/<repo>.md, deletes the
+# session's active file, makes the autosave commit and rebuilds the viewer.
+# WAYMARK_SESSION_END_SYNC=1 runs the job in the foreground, for tests.
 # Failures go to active/.session-end.log. Always exits 0, prints nothing.
 # No `set -e`, no heredocs.
 
@@ -76,18 +78,10 @@ se_background() {
   return 0
 }
 
-se_main() {
-  local layer id8 cwd act f line v nl=$'\n'
+# se_work <layer> <id8> <cwd as sent>: everything after the stdin parse
+se_work() {
+  local layer="$1" id8="$2" cwd="$3" act f line v nl=$'\n'
   local repo="" started="" task="" status="" files="" handoff="" have_act=0 alocked=0
-  local h_session_id h_cwd h_reason h__missing
-
-  wm__layer_find || return 0
-  layer="$WM_LAYER"
-
-  wm_json_read_stdin h session_id cwd reason
-  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
-  [ -n "$id8" ] || return 0
-  cwd="$h_cwd"
   case "$cwd" in *\\*|[A-Za-z]:*) cwd="$(wm_path "$cwd")" ;; esac
   [ -n "$cwd" ] || cwd="$se_pwd"
 
@@ -182,8 +176,13 @@ se_main() {
     [ -n "$hits" ] || hits=0
   fi
 
-  # ---- worklog entry, once per session ----
-  local htxt="none" wl="$layer/worklog.md" existing wlocked=0 entry
+  # ---- worklog entry, once per session segment ----
+  # Key: session id + start time, so a resumed session that keeps its id gets
+  # its own entry. Without an active file (a second fire, after the first one
+  # deleted it) any entry for the id counts, so a double fire writes once.
+  local htxt="none" wl="$layer/worklog.md" existing wlocked=0 entry key
+  key="- **Session:** $id8, "
+  [ "$have_act" = 0 ] || key="$key$started to "
   [ -z "$handoff" ] || htxt="$handoff"
   entry="$nl## $stamp — $repo — $task$nl- **Session:** $id8, $started to $ended, status $status$nl- **Commits:** $commits$nl- **Files touched:** $ftxt$nl- **Capture:** $cand candidates, $rec recorded, $dis dismissed, $def deferred$nl- **Recall hits:** $hits$nl- **Handoff:** $htxt$nl"
   wm__lockq "$layer" worklog && wlocked=1
@@ -191,7 +190,7 @@ se_main() {
   existing=""
   [ ! -f "$wl" ] || existing="$(<"$wl")"
   case "$existing" in
-    *"- **Session:** $id8, "*) se_log "$layer" "entry for $id8 already in worklog; skipped" ;;
+    *"$key"*) se_log "$layer" "entry for $id8 already in worklog; skipped" ;;
     *) printf '%s' "$entry" >> "$wl" 2>/dev/null || se_log "$layer" "cannot append to worklog.md" ;;
   esac
   existing=""
@@ -208,13 +207,25 @@ se_main() {
   fi
   [ "$alocked" = 0 ] || wm__unlockq "$layer" "active-$id8"
 
-  # ---- autosave + viewer: detached unless the test hook asks otherwise ----
+  # ---- autosave + viewer ----
+  se_background "$layer" "$id8"
+  return 0
+}
+
+# Synchronous part: builtins plus the one awk that parses stdin.
+se_main() {
+  local layer id8 h_session_id h_cwd h_reason h__missing
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+  wm_json_read_stdin h session_id cwd reason
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
   # active/ is gitignored, so a fresh clone may lack it; the log redirect needs it
   [ -d "$layer/active" ] || mkdir -p "$layer/active" 2>/dev/null
   if [ "${WAYMARK_SESSION_END_SYNC:-}" = 1 ]; then
-    se_background "$layer" "$id8" </dev/null >>"$layer/active/.session-end.log" 2>&1
+    se_work "$layer" "$id8" "$h_cwd" </dev/null >>"$layer/active/.session-end.log" 2>&1
   else
-    ( se_background "$layer" "$id8" ) </dev/null >>"$layer/active/.session-end.log" 2>&1 &
+    ( se_work "$layer" "$id8" "$h_cwd" ) </dev/null >>"$layer/active/.session-end.log" 2>&1 &
     disown 2>/dev/null
   fi
   return 0
