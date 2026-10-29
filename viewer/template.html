@@ -4,17 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Waymark snapshot</title>
+<!--WAYMARK:CSS-->
 </head>
 <body>
 <header id="wm-top">
-<h1>Waymark</h1>
-<p>Snapshot built <span id="wm-built"><!--WAYMARK:BUILT--></span></p>
-<button type="button" id="wm-search-open" aria-controls="wm-search" aria-expanded="false">Search (/)</button>
+<button type="button" id="wm-nav-toggle" aria-controls="wm-nav" aria-expanded="false">Files</button>
+<p id="wm-mark"><a href="#" id="wm-home">Waymark</a></p>
+<p id="wm-stamp">Snapshot built <span id="wm-built"><!--WAYMARK:BUILT--></span></p>
+<button type="button" id="wm-search-open" aria-controls="wm-search" aria-expanded="false"><span>Search</span> <kbd>/</kbd></button>
 </header>
 <section id="wm-search" role="search" aria-label="Search" hidden>
+<div id="wm-search-bar">
 <label for="wm-q">Search all files</label>
 <input type="search" id="wm-q" autocomplete="off" placeholder="words, or an ID such as G-0001">
 <button type="button" id="wm-search-close">Close</button>
+</div>
 <p id="wm-search-status" role="status"></p>
 <ol id="wm-results"></ol>
 </section>
@@ -25,7 +29,8 @@
 <div id="wm-tree" role="tree"></div>
 </nav>
 <main id="wm-main">
-<article id="wm-article" data-state="loading"><p>Loading...</p></article>
+<noscript><p id="wm-noscript">This snapshot renders its files with JavaScript. Turn scripting on for this file to read the layer.</p></noscript>
+<article id="wm-article" data-state="loading"><p>Opening the snapshot…</p></article>
 </main>
 </div>
 <!--WAYMARK:DATA-->
@@ -104,7 +109,8 @@ function loadVendor(id) {
 function loadMermaid() {
   if (!mermaidPromise) {
     mermaidPromise = loadVendor('wm-mermaid').then(function () {
-      window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict' });
+      var dark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+      window.mermaid.initialize({ startOnLoad: false, securityLevel: 'strict', theme: dark ? 'dark' : 'neutral', htmlLabels: false, flowchart: { htmlLabels: false } });
       return window.mermaid;
     });
   }
@@ -158,7 +164,7 @@ function scanEntries(f) {
   f.body.split('\n').forEach(function (line) {
     if (/^(```|~~~)/.test(line)) { inFence = !inFence; return; }
     if (inFence) { return; }
-    var m = /^#{2,6}[ \t]+([GDC]-\d{4})\b[ \t]*(?:[—–-]+[ \t]*(.*?))?[ \t]*$/.exec(line);
+    var m = /^#{2,6}[ \t]+([GDC]-\d{4})\b[ \t]*(?:[\u2014\u2013-]+[ \t]*(.*?))?[ \t]*$/.exec(line);
     if (m && !entries[m[1]]) { entries[m[1]] = { id: m[1], path: f.path, title: m[2] || '' }; }
   });
 }
@@ -334,9 +340,41 @@ function markEntryHeadings(root) {
   var hs = root.querySelectorAll('h1, h2, h3, h4, h5, h6');
   for (var i = 0; i < hs.length; i++) {
     var m = /^([GDC]-\d{4})\b/.exec(hs[i].textContent.trim());
-    if (m) { hs[i].setAttribute('data-entry', m[1]); hs[i].id = 'entry-' + m[1]; }
     var slug = hs[i].textContent.trim().toLowerCase().replace(/[^\p{L}\p{N}\s_-]/gu, '').replace(/\s+/g, '-');
     if (slug && !slugs[slug]) { slugs[slug] = 1; hs[i].setAttribute('data-slug', slug); }
+    if (m) { hs[i].setAttribute('data-entry', m[1]); hs[i].id = 'entry-' + m[1]; markEntry(hs[i], m[1]); }
+  }
+}
+// Entry heading "G-0001, a dash, Title": the ID becomes a mark, the title its own span;
+// a following "- **Key:** value" list becomes the entry's meta rows.
+function markEntry(h, id) {
+  var first = h.firstChild;
+  if (first && first.nodeType === 3 && first.data.indexOf(id) === 0) {
+    var t = el('span', { 'data-role': 'title' });
+    var rest = first.data.slice(id.length).replace(/^[ \t]*[\u2014\u2013-]*[ \t]*/, '');
+    if (rest) { t.appendChild(document.createTextNode(rest)); }
+    while (first.nextSibling) { t.appendChild(first.nextSibling); }
+    first.data = ' ';
+    h.insertBefore(el('span', { 'data-role': 'id' }, id), first);
+    if (t.firstChild) { h.appendChild(t); }
+  }
+  var ul = h.nextElementSibling;
+  if (!ul || ul.tagName !== 'UL') { return; }
+  var items = ul.children;
+  for (var i = 0; i < items.length; i++) {
+    var k = items[i].firstChild;
+    if (!k || k.nodeType !== 1 || k.tagName !== 'STRONG' || !/:$/.test(k.textContent)) { return; }
+  }
+  ul.setAttribute('data-role', 'entry-meta');
+  for (var j = 0; j < items.length; j++) {
+    var li = items[j];
+    var key = li.firstChild.textContent.replace(/:$/, '').trim().toLowerCase();
+    li.setAttribute('data-key', key);
+    var val = el('span', { 'data-role': 'value' });
+    while (li.firstChild.nextSibling) { val.appendChild(li.firstChild.nextSibling); }
+    if (val.firstChild && val.firstChild.nodeType === 3) { val.firstChild.data = val.firstChild.data.replace(/^\s+/, ''); }
+    li.appendChild(val);
+    if (key === 'status') { li.setAttribute('data-value', val.textContent.trim().toLowerCase()); }
   }
 }
 function renderMermaid(root, token) {
@@ -369,30 +407,49 @@ function renderMermaid(root, token) {
     return chain;
   });
 }
+var FIELD_LABEL = { status: 'Status', kind: 'Kind', created: 'Created', valid_until: 'Valid until', repo: 'Repo' };
+function tagList(v) {
+  return v.replace(/^\[|\]$/g, '').split(',').map(function (t) { return t.trim().replace(/^["']|["']$/g, ''); }).filter(Boolean);
+}
 function frontmatterHeader(file) {
   var fm = file.fm;
   var h = el('header', { id: 'wm-entry-header' });
+  h.appendChild(el('p', { 'data-role': 'path' }, file.path));
   h.appendChild(el('h1', null, file.title));
+  if (fm.summary) { h.appendChild(el('p', { 'data-field': 'summary' }, fm.summary)); }
   var dl = el('dl');
-  ['status', 'kind', 'created', 'valid_until', 'repo', 'summary'].forEach(function (k) {
+  ['status', 'kind', 'created', 'valid_until', 'repo'].forEach(function (k) {
     if (!fm[k]) { return; }
-    dl.appendChild(el('dt', null, k));
+    var row = el('div', { 'data-row': k });
+    row.appendChild(el('dt', null, FIELD_LABEL[k]));
     var dd = el('dd', { 'data-field': k }, fm[k]);
     if (k === 'valid_until' && /^\d{4}-\d{2}-\d{2}/.test(fm[k]) && fm[k].slice(0, 10) < new Date().toISOString().slice(0, 10)) {
       dd.setAttribute('data-state', 'expired');
       dd.appendChild(document.createTextNode(' '));
       dd.appendChild(el('strong', { 'data-badge': 'expired' }, 'expired'));
     }
-    dl.appendChild(dd);
+    row.appendChild(dd);
+    dl.appendChild(row);
   });
-  h.appendChild(dl);
+  var tags = fm.tags ? tagList(fm.tags) : [];
+  if (tags.length) {
+    var row = el('div', { 'data-row': 'tags' });
+    row.appendChild(el('dt', null, 'Tags'));
+    var dd = el('dd', { 'data-field': 'tags' });
+    var ul = el('ul', { 'data-role': 'tags' });
+    tags.forEach(function (t) { ul.appendChild(el('li', null, t)); });
+    dd.appendChild(ul);
+    row.appendChild(dd);
+    dl.appendChild(row);
+  }
+  if (dl.firstChild) { h.appendChild(dl); }
   return h;
 }
 function showError(file, message) {
   clear(article);
   article.setAttribute('data-state', 'error');
   article.setAttribute('data-path', file.path);
-  article.appendChild(el('p', { id: 'wm-error', role: 'alert' }, 'Could not render ' + file.path + ': ' + message));
+  article.appendChild(el('p', { id: 'wm-error', role: 'alert' }, 'Could not render ' + file.path + ': ' + String(message).replace(/\.$/, '') + '. Its raw text is below; save the file as UTF-8 and run waymark view again.'));
   article.appendChild(el('pre', { id: 'wm-raw' }, file.raw || file.text));
 }
 function scrollToEntry(id) {
@@ -427,6 +484,11 @@ function showFile(path, id) {
     if (file.fm) { article.appendChild(frontmatterHeader(file)); }
     var body = el('div', { id: 'wm-body' });
     body.innerHTML = html;
+    var lead = body.firstElementChild;
+    if (file.fm && lead && lead.tagName === 'H1' && lead.textContent.trim().toLowerCase() === file.title.trim().toLowerCase()) {
+      lead.setAttribute('data-role', 'doc-title');
+      lead.setAttribute('aria-hidden', 'true');
+    }
     article.appendChild(body);
     fixLinks(body, file);
     markEntryHeadings(body);
@@ -452,7 +514,7 @@ function showHome() {
   clear(article);
   article.setAttribute('data-state', 'home');
   article.removeAttribute('data-path');
-  article.appendChild(el('p', null, 'Select a file from the tree, or press / to search ' + files.length + ' files.'));
+  article.appendChild(el('p', null, 'Choose a file from the tree, or press / to search all ' + files.length + ' files.'));
 }
 function route() {
   var cur = parseHash();
@@ -472,6 +534,8 @@ function openSearch() {
   q.select();
 }
 function closeSearch() {
+  clearTimeout(searchTimer);
+  searchTimer = null;
   $('wm-search').hidden = true;
   $('wm-search-open').setAttribute('aria-expanded', 'false');
 }
@@ -543,6 +607,10 @@ function onSearchInput() {
 }
 
 /* -------------------------------------------------------------- init --- */
+function setMenu(open) {
+  if (open) { $('wm-nav').setAttribute('data-open', ''); } else { $('wm-nav').removeAttribute('data-open'); }
+  $('wm-nav-toggle').setAttribute('aria-expanded', open ? 'true' : 'false');
+}
 function isEditable(t) {
   return t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
 }
@@ -550,6 +618,7 @@ function bindUi() {
   $('wm-filter').addEventListener('input', renderTree);
   $('wm-search-open').addEventListener('click', openSearch);
   $('wm-search-close').addEventListener('click', closeSearch);
+  $('wm-nav-toggle').addEventListener('click', function () { setMenu(!$('wm-nav').hasAttribute('data-open')); });
   $('wm-q').addEventListener('input', function () {
     clearTimeout(searchTimer);
     searchTimer = setTimeout(onSearchInput, 120);
@@ -572,11 +641,12 @@ function bindUi() {
     }
   });
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && !$('wm-search').hidden) { closeSearch(); return; }
+    if (e.key === 'Escape' && !$('wm-search').hidden) { closeSearch(); $('wm-search-open').focus(); return; }
+    if (e.key === 'Escape' && $('wm-nav').hasAttribute('data-open')) { setMenu(false); $('wm-nav-toggle').focus(); return; }
     if ((e.ctrlKey || e.metaKey) && (e.key === 'k' || e.key === 'K')) { e.preventDefault(); openSearch(); return; }
     if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey && !isEditable(e.target)) { e.preventDefault(); openSearch(); }
   });
-  window.addEventListener('hashchange', route);
+  window.addEventListener('hashchange', function () { setMenu(false); route(); });
 }
 
 function start() {
@@ -585,7 +655,8 @@ function start() {
   if (!files.length) {
     clear(article);
     article.setAttribute('data-state', 'empty');
-    article.appendChild(el('p', { id: 'wm-empty' }, 'No markdown files in this layer.'));
+    article.appendChild(el('h1', null, 'Nothing here yet'));
+    article.appendChild(el('p', { id: 'wm-empty' }, 'No markdown files in this layer. Capture a gotcha or a decision in a session, then run waymark view again.'));
     return;
   }
   renderTree();

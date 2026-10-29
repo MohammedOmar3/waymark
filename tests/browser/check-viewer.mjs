@@ -2,9 +2,11 @@
 // Drives headless Chrome (or Edge) over the DevTools Protocol with Node's built-in
 // WebSocket and fetch. No npm dependencies. Selects by ids and roles only.
 //
-//   node tests/browser/check-viewer.mjs [--html <built viewer>] [--keep]
+//   node tests/browser/check-viewer.mjs [--html <built viewer>] [--mode light|dark|both] [--keep]
 //
 // Without --html it builds the viewer from tests/fixtures/viewer-layer (plus a CRLF file).
+// Every check runs once per colour mode (CDP Emulation.setEmulatedMedia, prefers-color-scheme),
+// at 1440x900, then the layout checks run at 375x812 and 1440x900.
 import { spawn, execFileSync } from 'node:child_process';
 import { existsSync, mkdtempSync, cpSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -88,7 +90,8 @@ async function load(path) {
   await until(`document.readyState === 'complete' && document.getElementById('wm-article') && document.getElementById('wm-article').dataset.state !== 'loading'`);
 }
 async function key(k) {
-  for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: k, text: type === 'keyDown' ? k : undefined });
+  // only printable keys carry text, so a named key such as Escape types nothing into a field
+  for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: k, text: type === 'keyDown' && k.length === 1 ? k : undefined });
 }
 async function typeQuery(q) {
   await ev(`(() => { const i = document.getElementById('wm-q'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
@@ -96,14 +99,31 @@ async function typeQuery(q) {
 }
 
 let failed = 0;
-const report = (ok, name, extra = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'} ${name}${!ok && extra ? ' -- ' + extra : ''}`); };
+let tag = '';
+const report = (ok, name, extra = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'} ${tag}${name}${!ok && extra ? ' -- ' + extra : ''}`); };
+const modeArg = argOf('--mode') || 'both';
+const modes = modeArg === 'both' ? ['light', 'dark'] : [modeArg];
+async function viewport(width, height) {
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+}
+async function setMode(mode) {
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: mode }] });
+}
 
 try {
   await connect();
   await send('Runtime.enable'); await send('Page.enable');
+  for (const mode of modes) {
+  tag = `[${mode}] `;
+  await setMode(mode);
+  await viewport(1440, 900);
 
   // 1. tree
   await load(htmlPath);
+  const scheme = await ev(`({ dark: matchMedia('(prefers-color-scheme: dark)').matches, bg: getComputedStyle(document.body).backgroundColor, ink: getComputedStyle(document.body).color })`);
+  // lightness 0..1 of a computed colour, oklch() or rgb()
+  const lum = (c) => { const n = (c.match(/[\d.]+/g) || []).map(Number); return /^oklch/.test(c) ? n[0] : (n[0] + n[1] + n[2]) / 765; };
+  report(scheme.dark === (mode === 'dark') && (mode === 'dark' ? lum(scheme.bg) < lum(scheme.ink) : lum(scheme.bg) > lum(scheme.ink)), `${mode} colour scheme applies`, JSON.stringify(scheme));
   const treePaths = await ev(`Array.from(document.querySelectorAll('#wm-tree a[data-path]')).map(a => a.dataset.path).sort()`);
   report(JSON.stringify(treePaths) === JSON.stringify(fixtureFiles), 'tree shows all fixture files', JSON.stringify(treePaths));
   await ev(`(() => { const f = document.getElementById('wm-filter'); f.value = 'arab'; f.dispatchEvent(new Event('input', { bubbles: true })); })()`);
@@ -130,10 +150,27 @@ try {
   const target = await ev(`document.querySelector('[data-target]')?.id`);
   report(jump.hash === '#gotchas.md:G-0001' && target === 'entry-G-0001' && jump.hidden, 'search G-0001 jumps to the entry', JSON.stringify({ jump, target }));
 
+  // closing search cancels a pending debounced ID jump
+  await ev(`document.body.focus()`);
+  await key('/');
+  const before = await ev(`location.hash`);
+  await ev(`(() => { const i = document.getElementById('wm-q'); i.value = 'G-0002'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  // dispatched on the document: a real Escape inside type=search also clears the field natively,
+  // which fires its own input event and would hide a missing clearTimeout
+  await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await sleep(350);
+  const deb = await ev(`({ hash: location.hash, hidden: document.getElementById('wm-search').hidden })`);
+  report(deb.hidden && deb.hash === before && !deb.hash.endsWith(':G-0002'), 'Escape cancels the pending search debounce (no late ID jump)', JSON.stringify({ before, deb }));
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await ev(`(() => { const i = document.getElementById('wm-q'); i.value = 'G-0002'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await ev(`document.getElementById('wm-search-close').click()`);
+  await sleep(350);
+  report((await ev(`location.hash`)) === before, 'Close button cancels the pending search debounce');
+
   // 4. mermaid renders
   await ev(`location.hash = '#docs/waymark/x.md'`);
   const mm = await until(`document.querySelector('#wm-body figure[data-mermaid] svg')`, 30000);
-  report(mm, 'mermaid diagram renders to svg', JSON.stringify(await ev(`document.getElementById('wm-article').innerText.slice(0, 300)`)));
+  report(mm && (await ev(`/Session/.test(document.querySelector('#wm-body figure[data-mermaid] svg').textContent) && /Capture/.test(document.querySelector('#wm-body figure[data-mermaid] svg').textContent)`)), 'mermaid diagram renders to svg with its labels', JSON.stringify(await ev(`document.getElementById('wm-article').innerText.slice(0, 300)`)));
   const hdr = await ev(`({ expired: !!document.querySelector('#wm-entry-header [data-state=expired]'), title: document.querySelector('#wm-entry-header h1')?.textContent })`);
   report(hdr.expired && hdr.title === 'Waymark design notes', 'frontmatter header shows expired valid_until', JSON.stringify(hdr));
   report(await ev(`!!document.querySelector('#wm-body a[data-entry-link="G-0001"]')`), 'ID token becomes a link');
@@ -185,6 +222,8 @@ try {
   await ev(`document.body.focus()`);
   await key('/');
   await typeQuery('offline');
+  // the reloaded page may still be loading mermaid, which can hold the debounce timer past the fixed wait
+  await until(`document.querySelector('#wm-results li[data-path="decisions.md"] a')`);
   await ev(`document.querySelector('#wm-results li[data-path="decisions.md"] a').click()`);
   await until(`document.getElementById('wm-article').dataset.path === 'decisions.md'`);
   await until(`document.querySelector('#wm-body mark')`);
@@ -193,6 +232,40 @@ try {
   // empty state
   await load(emptyHtml);
   report(await ev(`document.getElementById('wm-empty') && document.getElementById('wm-article').dataset.state === 'empty'`), 'empty state for a layer with no files');
+
+  }
+  tag = '';
+
+  // layout: 375 (sidebar is a menu, no sideways scroll) and 1440 (sidebar shown)
+  for (const mode of modes) {
+    tag = `[${mode}] `;
+    await setMode(mode);
+    await viewport(375, 812);
+    await load(htmlPath);
+    await ev(`location.hash = '#docs/waymark/x.md'`);
+    await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+    const n = await ev(`(() => { const nav = document.getElementById('wm-nav'), t = document.getElementById('wm-nav-toggle');
+      return { sw: document.documentElement.scrollWidth, bw: document.body.scrollWidth, iw: innerWidth, nav: getComputedStyle(nav).display, toggle: getComputedStyle(t).display, exp: t.getAttribute('aria-expanded') }; })()`);
+    report(n.sw <= n.iw && n.bw <= n.iw, '375px: no horizontal scroll', JSON.stringify(n));
+    report(n.nav === 'none' && n.toggle !== 'none' && n.exp === 'false', '375px: sidebar collapsed behind the Files menu button', JSON.stringify(n));
+    await ev(`document.getElementById('wm-nav-toggle').click()`);
+    const o = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded'), sw: document.documentElement.scrollWidth, iw: innerWidth })`);
+    report(o.nav !== 'none' && o.exp === 'true' && o.sw <= o.iw, '375px: Files button opens the tree', JSON.stringify(o));
+    await ev(`document.querySelector('#wm-tree a[data-path="gotchas.md"]').click()`);
+    await until(`document.getElementById('wm-article').dataset.path === 'gotchas.md'`);
+    const c = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded') })`);
+    report(c.nav === 'none' && c.exp === 'false', '375px: choosing a file closes the menu', JSON.stringify(c));
+    await viewport(1440, 900);
+    await load(htmlPath);
+    await ev(`location.hash = '#docs/waymark/x.md'`);
+    await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+    // prose measure in ch: the paragraph box against the width of a "0" in the paragraph's own font
+    const w = await ev(`(() => { const nav = document.getElementById('wm-nav'), p = document.querySelector('#wm-body p');
+      const z = document.createElement('span'); z.textContent = '0'; z.style.position = 'absolute'; p.appendChild(z); const ch = z.getBoundingClientRect().width; z.remove();
+      return { sw: document.documentElement.scrollWidth, iw: innerWidth, nav: getComputedStyle(nav).display, navW: Math.round(nav.getBoundingClientRect().width), toggle: getComputedStyle(document.getElementById('wm-nav-toggle')).display, pCh: Math.round(p.getBoundingClientRect().width / ch) }; })()`);
+    report(w.sw <= w.iw && w.nav !== 'none' && w.navW > 200 && w.toggle === 'none' && w.pCh >= 45 && w.pCh <= 75, '1440px: sidebar shown, no menu button, prose measure 45 to 75ch, no horizontal scroll', JSON.stringify(w));
+  }
+  tag = '';
 
   report(problems.length === 0, 'no page errors or console errors', problems.slice(0, 3).join(' | '));
 } catch (e) {

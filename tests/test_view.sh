@@ -172,3 +172,16 @@ test_view_gitignore_guard() {
   t_view_build "$L" "$WM_SANDBOX_DIR/v.html" >/dev/null
   t_eq "no" "$([ -e "$L/.gitignore" ] && echo yes || echo no)" "no .gitignore is not created"
 }
+
+test_view_inlines_css() {
+  t_sandbox
+  local L="$WM_SANDBOX_DIR/l" out="$WM_SANDBOX_DIR/v.html" first
+  t_view_layer "$L"
+  t_view_build "$L" "$out" >/dev/null
+  t_eq "0" "$(grep -c 'WAYMARK:CSS' "$out")" "CSS marker replaced"
+  t_eq "1" "$(grep -c '^<style>$' "$out")" "one style element"
+  first="$(awk '/^<style>$/ { on = 1; next } on && NF { print; exit }' "$out")"
+  t_contains "$first" '/* Hallmark ' "stamp is the first line inside <style>"
+  t_eq "0" "$(grep -ci '<link[^>]*rel=["'"'"']\{0,1\}stylesheet' "$out")" "no stylesheet link"
+  t_eq "1" "$(awk '/^<style>$/ { on = 1; next } /^<\/style>$/ { on = 0 } on && /--color-paper:/ { n = 1 } END { print n + 0 }' "$out")" "tokens inlined inside <style>"
+}

@@ -19,6 +19,14 @@ wm_vw_plugin="${wm_here%/*}"
 wm_vw_tpl="$wm_vw_plugin/viewer/template.html"
 wm_vw_vendor="$wm_vw_plugin/viewer/vendor"
 [ -f "$wm_vw_tpl" ] || { printf 'waymark view: missing template: %s\n' "$wm_vw_tpl" >&2; exit 2; }
+# Stylesheets inlined at <!--WAYMARK:CSS--> in this order (tokens first: it holds the Hallmark stamp).
+wm_vw_cssdir="$wm_vw_plugin/viewer"
+for wm_vw_c in tokens.css base.css viewer.css; do
+  [ -f "$wm_vw_cssdir/$wm_vw_c" ] || { printf 'waymark view: missing stylesheet: %s\n' "$wm_vw_c" >&2; exit 2; }
+  if grep -qi '</style' "$wm_vw_cssdir/$wm_vw_c"; then
+    printf 'waymark view: stylesheet must not contain </style: %s\n' "$wm_vw_c" >&2; exit 2
+  fi
+done
 
 if [ "$wm_vw_outset" = 1 ] && [ -z "$wm_vw_out" ]; then
   printf 'waymark view: --out needs a non-empty file name\n' >&2; exit 64
@@ -82,6 +90,11 @@ wm_vw_list="$(cd "$wm_vw_layer" && LC_ALL=C find . \
 $wm_vw_list
 EOF
         fi
+        ;;
+      '<!--WAYMARK:CSS-->')
+        printf '<style>\n'
+        cat "$wm_vw_cssdir/tokens.css" "$wm_vw_cssdir/base.css" "$wm_vw_cssdir/viewer.css"
+        printf '</style>\n'
         ;;
       '<!--WAYMARK:VENDOR-->')
         printf '<script type="text/plain" id="wm-marked">'; wm_vw_b64 "$wm_vw_vendor/marked.min.js"; printf '</script>\n'
