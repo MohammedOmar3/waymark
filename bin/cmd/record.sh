@@ -56,6 +56,13 @@ wm_rec_layer="$(wm_layer_root)" || wm_tri_die "no layer found"
 if [ -n "$wm_rec_from" ]; then
   wm_tri_cand_file "$wm_rec_layer" "$wm_rec_from"
   wm_rec_row="$(wm_tri_list_raw "$WM_CF" | awk -F'\t' -v id="$wm_rec_from" '$1 == id { print; exit }')"
+  # a candidate already answered is not recorded again (a retried call would duplicate the entry)
+  if [ -n "$wm_rec_row" ]; then
+    wm_rec_st="${wm_rec_row#*$'\t'}"; wm_rec_st="${wm_rec_st%%$'\t'*}"; wm_rec_st="${wm_rec_st%$'\r'}"
+    case "${wm_rec_st%% *}" in
+      recorded|dismissed) wm_tri_die "candidate $wm_rec_from is already $wm_rec_st; nothing recorded" ;;
+    esac
+  fi
   if [ -z "$wm_rec_match" ]; then
     wm_rec_first="$(printf '%s' "$wm_rec_row" | cut -f4-)"
     wm_rec_first="${wm_rec_first%$'\r'}"

@@ -1,11 +1,13 @@
 # waymark init  (sourced by bin/waymark; uses exit)
 #   --owner-name <s> --owner-email <s> --root <dir> [--repo-roots <a,b>]
 #   [--replace-auto-memory yes|no] [--sign-layer yes|no] [--email-allowlist <a,b>]
-#   [--plugin-root <dir>]
+#   [--plugin-root <dir>] [--force]
+# --force: repoint waymark.conf even when it already names another existing
+# layer (that layer is left on disk). Without it init refuses, creating nothing.
 # Non-interactive setup engine. Never touches Claude settings.
 
 wm_i_name=""; wm_i_email=""; wm_i_root=""; wm_i_repo_roots=""
-wm_i_replace="no"; wm_i_sign=""; wm_i_allow=""; wm_i_plugin=""
+wm_i_replace="no"; wm_i_sign=""; wm_i_allow=""; wm_i_plugin=""; wm_i_force=0
 
 wm_i_die() { printf 'waymark init: %s\n' "$1" >&2; exit "${2:-2}"; }
 
@@ -24,6 +26,7 @@ while [ $# -gt 0 ]; do
         --plugin-root) wm_i_plugin="$2" ;;
       esac
       shift 2 ;;
+    --force) wm_i_force=1; shift ;;
     *) wm_i_die "unknown argument: $1" 64 ;;
   esac
 done
@@ -48,6 +51,17 @@ if [ -e "$wm_i_root" ]; then
   [ -d "$wm_i_root" ] || wm_i_die "root exists and is not a directory: $wm_i_root"
   if [ -n "$(ls -A "$wm_i_root" 2>/dev/null)" ]; then
     wm_i_die "root exists and is not empty: $wm_i_root"
+  fi
+fi
+
+# an existing pointer to another live layer would be orphaned by this init
+wm_i_prev="$(wm_conf_get "$(wm_config_home)/waymark.conf" root 2>/dev/null)"
+case "$wm_i_prev" in *'\'*|[A-Za-z]:*) wm_i_prev="$(wm_path "$wm_i_prev")" ;; esac
+if [ -n "$wm_i_prev" ] && [ "$wm_i_prev" != "$wm_i_root" ] && [ -f "$wm_i_prev/layer.conf" ]; then
+  if [ "$wm_i_force" = 1 ]; then
+    printf 'waymark init: warning: waymark.conf pointed to the layer at %s; it will point to the new layer (the old layer is left on disk)\n' "$wm_i_prev" >&2
+  else
+    wm_i_die "waymark.conf already points to an existing layer at $wm_i_prev; nothing created (pass --force to point it at the new layer; the old layer is left on disk)"
   fi
 fi
 

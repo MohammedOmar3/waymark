@@ -84,9 +84,14 @@ test_init_gpgsign() {
 test_init_gpgsign_sign_layer_yes() {
   local r="$WM_SANDBOX_DIR/layer"
   git config --global commit.gpgsign true
-  git config --global gpg.program /bin/true
+  # a stand-in signer that git accepts (/bin/true makes the commit fail, so
+  # init used to abort and the check below ran against a deleted root)
+  printf '#!/bin/sh\ncat >/dev/null\nprintf "\n[GNUPG:] SIG_CREATED D 1 8 00 0 X\n" >&2\nprintf -- "-----BEGIN PGP SIGNATURE-----\n\nfake\n-----END PGP SIGNATURE-----\n"\n' > "$WM_SANDBOX_DIR/fakegpg"
+  chmod +x "$WM_SANDBOX_DIR/fakegpg"
+  git config --global gpg.program "$WM_SANDBOX_DIR/fakegpg"
   t_init "$r" --sign-layer yes >/dev/null 2>&1
-  t_eq "" "$(git -C "$r" config --local commit.gpgsign)" "local gpgsign untouched"
+  t_eq 0 "$?" "init with --sign-layer yes succeeds"
+  t_eq "" "$(git -C "$r" config --local commit.gpgsign 2>&1)" "local gpgsign untouched"
 }
 
 test_init_path_with_space() {
@@ -142,4 +147,20 @@ test_init_ampersand_name() {
   t_eq 0 "$?" "init with ampersand"
   . "$WM_PLUGIN/bin/lib.sh"
   t_eq 'A & B' "$(wm_conf_get "$r/layer.conf" owner_name)" "owner_name keeps &"
+}
+
+test_init_refuses_to_orphan_existing_layer() {
+  local a="$WM_SANDBOX_DIR/layer-a" b="$WM_SANDBOX_DIR/layer-b" out rc
+  t_init "$a" >/dev/null 2>&1
+  out="$(t_init "$b" 2>&1 >/dev/null)"; rc=$?
+  t_eq 2 "$rc" "second init refused while waymark.conf points to a layer"
+  t_contains "$out" "already points to an existing layer" "warning on stderr"
+  [ ! -e "$b" ]; t_eq 0 "$?" "nothing created"
+  . "$WM_PLUGIN/bin/lib.sh"
+  t_eq "$a" "$(wm_conf_get "$CLAUDE_CONFIG_DIR/waymark.conf" root)" "pointer unchanged"
+  out="$(t_init "$b" --force 2>&1 >/dev/null)"; rc=$?
+  t_eq 0 "$rc" "--force repoints"
+  t_contains "$out" "warning" "--force still warns"
+  t_eq "$b" "$(wm_conf_get "$CLAUDE_CONFIG_DIR/waymark.conf" root)" "pointer moved"
+  t_file_exists "$a/layer.conf" "old layer left on disk"
 }

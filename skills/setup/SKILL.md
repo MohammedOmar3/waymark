@@ -27,7 +27,7 @@ On yes run (omit flags the user left empty):
 "${CLAUDE_PLUGIN_ROOT}/bin/waymark" init --owner-name "<name>" --owner-email "<email>" --root "<layer>" --repo-roots "<a,b>" --replace-auto-memory yes|no --sign-layer yes|no --email-allowlist "<a,b>" --plugin-root "${CLAUDE_PLUGIN_ROOT}"
 ```
 
-`init` never touches Claude settings. If it fails, show its message and stop; do not retry with `--force`-style workarounds or delete anything.
+`init` never touches Claude settings. If it fails, show its message and stop; do not retry with `--force`-style workarounds or delete anything. One exception: if it says `waymark.conf` already points to an existing layer, ask the user whether to point waymark at the new layer instead (the old one stays on disk), and rerun with `--force` only on an explicit yes.
 
 ## 4. Auto-memory (only if replace = yes)
 The setting is `autoMemoryEnabled` (boolean) in the user settings file `${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json` (see `docs/hook-contract.md`, "Auto-memory setting"; env alternative `CLAUDE_CODE_DISABLE_AUTO_MEMORY=1`).

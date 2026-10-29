@@ -28,6 +28,15 @@ pt_files_touched() {
   [ -n "$fp" ] || return 0
   for f in "$layer"/active/*"--$id8.md"; do [ -f "$f" ] && { act="$f"; break; }; done
   [ -n "$act" ] || return 0
+  # Layer files (the active file itself, layer docs) are not "files touched".
+  # Builtin test -ef per parent dir, so C:/ and /c/ spellings both match.
+  case "$fp" in "$layer"/*) return 0 ;; esac
+  d="${fp%/*}"
+  while [ -n "$d" ]; do
+    [ "$d" -ef "$layer" ] && return 0
+    [ "$d" != "${d%/*}" ] || break
+    d="${d%/*}"
+  done
   # Relative to the SESSION's repo root (nearest .git above cwd, lexical walk);
   # files outside it (another repo, a submodule's parent) stay absolute.
   d="${cwd%/}"; root=""

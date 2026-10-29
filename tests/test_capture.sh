@@ -336,3 +336,13 @@ test_no_layer_silent() {
     t_eq "0" "$rc" "$h: exit 0"
   done
 }
+
+test_files_touched_skips_layer_paths() {
+  t_cap_setup
+  t_post_file Edit "$ACT"
+  t_post_file Write "$L/docs/notes.md"
+  local wl; wl="$(cd "$L" && pwd -W 2>/dev/null || pwd)"
+  t_post_file Write "$wl/gotchas.md"
+  t_post_file Write "$R/src/a.ts"
+  t_eq "files touched: src/a.ts" "$(grep '^files touched:' "$ACT")" "layer paths (any spelling) not recorded"
+}

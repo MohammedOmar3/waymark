@@ -239,3 +239,18 @@ test_commit_command() {
   t_eq "ok" "$(wm commit "manual save")" "prints ok"
   t_eq "manual save" "$(git -C "$L" log -1 --format=%s)" "committed"
 }
+
+test_record_from_terminal_refused() {
+  local out rc
+  t_rec_setup
+  t_rec_cand
+  wm record gotcha --from I-abcd1234-1 --symptom s --cause c --fix f >/dev/null
+  out="$(wm record gotcha --from I-abcd1234-1 --symptom s --cause c --fix f 2>&1)"; rc=$?
+  t_eq 2 "$rc" "re-record of a recorded candidate exits 2"
+  t_contains "$out" "already recorded" "clear message"
+  t_eq 1 "$(grep -c '^## G-' "$L/gotchas.md")" "no duplicate entry"
+  wm dismiss I-abcd1234-2 >/dev/null
+  out="$(wm record gotcha --from I-abcd1234-2 --symptom s --cause c --fix f 2>&1)"; rc=$?
+  t_eq 2 "$rc" "record of a dismissed candidate exits 2"
+  t_contains "$out" "already dismissed" "dismissed message"
+}
