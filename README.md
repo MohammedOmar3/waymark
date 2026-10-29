@@ -9,12 +9,12 @@ Other memory tools for Claude Code tend to be automatic recall engines that need
 - Plain markdown in git, with long-form docs (specs, plans, analyses) alongside short facts.
 - A secrets scan on every commit.
 - Awareness of parallel sessions, including several in one repository.
-- Deterministic hooks with a fixed context budget (about 1,500 tokens at session start).
+- Deterministic hooks with a fixed context budget (session-start context capped at 6,000 bytes, about 1,500 tokens).
 - Capture that does not depend on the model remembering: hooks record raw signal mechanically, and gates make Claude triage it at specific moments.
 
 ## Install
 
-From the marketplace:
+From the marketplace, once the repository is published (replace `<owner>` with its GitHub owner):
 
 ```
 /plugin marketplace add <owner>/waymark
@@ -38,12 +38,12 @@ Setup asks for your name and email, where the memory layer should live (default 
 
 ## How the loop works
 
-**Capture.** Hooks watch for signal and never block you from leaving.
+**Capture.** Hooks watch for signal and do not block normal exits.
 
 - A failed Bash command becomes an inbox candidate (command, exit code, the first lines of output, repo), deduplicated per session.
 - A prompt containing "remember", "note that", "don't forget" or "for future" creates a mandatory candidate and tells Claude to record it before replying.
 - Files written or edited are tracked in the session's active file.
-- When Claude tries to stop with untriaged candidates, a gate blocks once and asks it to record, dismiss or defer each one. Each candidate gates at most once. Before a compaction, a gate also asks for a handoff note.
+- When Claude tries to stop with untriaged candidates, a gate blocks and asks it to record, dismiss or defer each one. An ordinary candidate gates at most once; a mandatory candidate keeps blocking until it is recorded, dismissed or deferred. Before a compaction, a gate also asks for a handoff note.
 - When a session ends, a worklog entry is written from facts (commits made, files touched, capture score, recall hits), the handoff is saved, and the layer is autosaved as `chore: autosave session <id8>`.
 
 **Recall.** At session start, waymark injects a capped briefing: the protocol, the repo and its tags, the previous handoff, playbook rules, up to 15 gotcha headings, other active sessions, and one-line warnings. The injection is limited to 6,000 bytes. When a Bash command fails and its output matches a recorded gotcha's `Match:` text, that gotcha (cause and fix) is injected immediately. When a command matches a playbook trigger, the playbook checklist is injected before it runs.
