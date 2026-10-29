@@ -1,6 +1,9 @@
-<!-- Logo: when docs/images/logo.svg exists, replace the heading below with:
-<p align="center"><img src="docs/images/logo.svg" alt="waymark" width="120"></p>
--->
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/logo-dark.svg">
+    <img src="docs/images/logo.svg" alt="waymark logo" height="96">
+  </picture>
+</p>
 
 <h1 align="center">waymark</h1>
 
@@ -10,10 +13,10 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-blue.svg"></a>
-  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-d97757.svg">
-  <img alt="Dependencies: bash and git" src="https://img.shields.io/badge/dependencies-bash%20%2B%20git-2ea44f.svg">
-  <img alt="Works offline" src="https://img.shields.io/badge/network-none-555.svg">
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-15151B.svg"></a>
+  <img alt="Claude Code plugin" src="https://img.shields.io/badge/Claude%20Code-plugin-1E7A4A.svg">
+  <img alt="Dependencies: bash and git" src="https://img.shields.io/badge/dependencies-bash%20%2B%20git-15151B.svg">
+  <img alt="Works offline" src="https://img.shields.io/badge/network-none-15151B.svg">
 </p>
 
 <p align="center">
@@ -25,7 +28,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/viewer-gotchas.png" alt="The waymark viewer showing a gotchas log with a file tree of memory files" width="880">
+  <img src="docs/images/banner.png" alt="waymark: capture, triage, recall, distill. Every Claude Code session leaves trail markers for the next one." width="880">
 </p>
 
 ---
@@ -46,6 +49,10 @@ Waymark turns that lost knowledge into a plain-markdown notebook in a git reposi
 - **Distills over time.** `/waymark:review` turns clusters of gotchas into playbook rules with command triggers, so the checklist appears *before* the risky command runs.
 - **Stays yours.** Plain markdown, in git, on your disk. Read it, diff it, blame it, revert it. A secrets scan runs on every commit, and nothing is ever sent anywhere.
 - **Costs almost nothing.** Bash and git only: no Node, Python, Docker, database or vector store, and no extra model calls. The session-start briefing is capped at 6,000 bytes (about 1,500 tokens).
+
+<p align="center">
+  <img src="docs/images/viewer-gotchas.png" alt="The waymark viewer showing a gotchas log with a file tree of memory files" width="880">
+</p>
 
 ## Install
 
