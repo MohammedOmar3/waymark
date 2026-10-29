@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# waymark PreCompact hook (spec section 8, rulings R7 and R23).
+# PreCompact cannot inject context and must never block (that would stall
+# auto-compaction), so it only snapshots to disk: active/.compact-pending-<id8>
+# holds this session's open candidate IDs (new gated deferred mandatory), one
+# per line, possibly none. SessionStart(source=compact) injects the triage and
+# handoff instruction and removes the marker. Always exits 0, prints nothing.
+# No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+pc_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && pc_dir="$PWD" ;;
+  *) pc_dir="$PWD" ;;
+esac
+pc_plugin="${pc_dir%/*}"
+. "$pc_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard PreCompact
+
+pc_main() {
+  local layer id8 file rows line id st out="" tmp marker oldifs nl=$'\n'
+  local h_session_id h__missing
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+
+  wm_json_read_stdin h session_id
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
+
+  file="$layer/inbox/$id8.md"
+  if [ -s "$file" ]; then
+    wm_tri_cmd=__lib
+    . "$pc_plugin/bin/cmd/triage.sh" 2>/dev/null || return 0
+    rows="$(wm_tri_list_raw "$file")"
+    set -f
+    oldifs="$IFS"; IFS=$'\n'
+    for line in $rows; do
+      IFS="$oldifs"
+      id="${line%%$'\t'*}"; st="${line#*$'\t'}"; st="${st%%$'\t'*}"; st="${st%% *}"
+      case "$st" in
+        new|gated|deferred|mandatory) out="${out:+$out$nl}$id" ;;
+      esac
+      IFS=$'\n'
+    done
+    IFS="$oldifs"; set +f
+  fi
+
+  [ -d "$layer/active" ] || mkdir -p "$layer/active" 2>/dev/null || return 0
+  marker="$layer/active/.compact-pending-$id8"
+  tmp="$marker.tmp.$$"
+  if [ -n "$out" ]; then printf '%s\n' "$out" > "$tmp" 2>/dev/null; else : > "$tmp" 2>/dev/null; fi
+  mv -f "$tmp" "$marker" 2>/dev/null || rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+pc_main
+exit 0

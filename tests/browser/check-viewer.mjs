@@ -1,0 +1,338 @@
+// Dev-only behaviour check for `waymark view` (not part of tests/run.sh).
+// Drives headless Chrome (or Edge) over the DevTools Protocol with Node's built-in
+// WebSocket and fetch. No npm dependencies. Selects by ids and roles only.
+//
+//   node tests/browser/check-viewer.mjs [--html <built viewer>] [--mode light|dark|both] [--keep]
+//
+// Without --html it builds the viewer from tests/fixtures/viewer-layer (plus a CRLF file).
+// Every check runs once per colour mode (CDP Emulation.setEmulatedMedia, prefers-color-scheme),
+// at 1440x900, then the layout checks run at 375x812 and 1440x900.
+import { spawn, execFileSync } from 'node:child_process';
+import { existsSync, mkdtempSync, cpSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve, dirname } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const here = dirname(fileURLToPath(import.meta.url));
+const repo = resolve(here, '..', '..');
+const args = process.argv.slice(2);
+const argOf = (k) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : null; };
+const fwd = (p) => p.replace(/\\/g, '/');
+
+const browsers = [
+  'C:/Program Files/Google/Chrome/Application/chrome.exe',
+  'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe',
+  '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+];
+const browser = browsers.find((b) => existsSync(b));
+if (!browser) { console.error('no Chrome/Edge found'); process.exit(2); }
+
+const tmp = mkdtempSync(join(tmpdir(), 'wm-view-'));
+function build(layer, out) {
+  execFileSync('bash', [fwd(join(repo, 'bin', 'waymark')), 'view', '--no-open', '--out', fwd(out)],
+    { env: { ...process.env, WAYMARK_ROOT: fwd(layer) }, stdio: ['ignore', 'ignore', 'inherit'] });
+}
+let htmlPath = argOf('--html');
+const fixtureFiles = ['decisions.md', 'docs/arabic.md', 'docs/crlf.md', 'docs/script-tag.md', 'docs/waymark/x.md', 'gotchas.md'];
+if (!htmlPath) {
+  const layer = join(tmp, 'layer');
+  cpSync(join(repo, 'tests', 'fixtures', 'viewer-layer'), layer, { recursive: true });
+  writeFileSync(join(layer, 'docs', 'crlf.md'), '---\r\ntitle: Crlf\r\n---\r\n\r\n# Crlf file\r\n\r\ntext\r\n');
+  htmlPath = join(tmp, 'v.html');
+  build(layer, htmlPath);
+}
+const emptyLayer = join(tmp, 'empty');
+mkdirSync(emptyLayer);
+writeFileSync(join(emptyLayer, 'layer.conf'), 'version=1\n');
+const emptyHtml = join(tmp, 'empty.html');
+build(emptyLayer, emptyHtml);
+
+const port = 9300 + Math.floor(Math.random() * 500);
+const chrome = spawn(browser, ['--headless=new', `--remote-debugging-port=${port}`, `--user-data-dir=${join(tmp, 'profile')}`,
+  '--no-first-run', '--no-default-browser-check', '--disable-gpu', 'about:blank'], { stdio: 'ignore' });
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+let ws; let nextId = 1; const pending = new Map(); const problems = [];
+async function connect() {
+  for (let i = 0; i < 100; i++) {
+    try {
+      const list = await (await fetch(`http://127.0.0.1:${port}/json`)).json();
+      const page = list.find((t) => t.type === 'page');
+      if (page) {
+        ws = new WebSocket(page.webSocketDebuggerUrl);
+        await new Promise((ok, bad) => { ws.onopen = ok; ws.onerror = bad; });
+        ws.onmessage = (m) => {
+          const d = JSON.parse(m.data);
+          if (d.id && pending.has(d.id)) { pending.get(d.id)(d); pending.delete(d.id); }
+          else if (d.method === 'Runtime.exceptionThrown') problems.push(d.params.exceptionDetails.exception?.description || d.params.exceptionDetails.text);
+          else if (d.method === 'Runtime.consoleAPICalled' && d.params.type === 'error') problems.push(d.params.args.map((a) => a.value ?? a.description).join(' '));
+        };
+        return;
+      }
+    } catch { /* browser not ready */ }
+    await sleep(100);
+  }
+  throw new Error('could not connect to browser');
+}
+const send = (method, params = {}) => new Promise((ok) => { const id = nextId++; pending.set(id, ok); ws.send(JSON.stringify({ id, method, params })); });
+async function ev(expr) {
+  const r = await send('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+  if (r.result?.exceptionDetails) throw new Error(r.result.exceptionDetails.exception?.description || 'eval failed');
+  return r.result.result.value;
+}
+async function until(expr, ms = 15000) {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { try { if (await ev(`!!(${expr})`)) return true; } catch { /* page navigating */ } await sleep(100); }
+  return false;
+}
+async function load(path) {
+  await send('Page.navigate', { url: pathToFileURL(path).href });
+  await until(`document.readyState === 'complete' && document.getElementById('wm-article') && document.getElementById('wm-article').dataset.state !== 'loading'`);
+}
+async function key(k, modifiers = 0) {
+  // only printable keys carry text, so a named key such as Escape types nothing into a field
+  for (const type of ['keyDown', 'keyUp']) await send('Input.dispatchKeyEvent', { type, key: k, modifiers, text: type === 'keyDown' && k.length === 1 ? k : undefined });
+}
+async function click(x, y) {
+  for (const type of ['mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x, y, button: 'left', clickCount: 1 });
+}
+const focusInfo = `(() => { const a = document.activeElement; return { id: a.id, tag: a.tagName, inSearch: document.getElementById('wm-search').contains(a), inArticle: document.getElementById('wm-article').contains(a), key: a.id || a.getAttribute('href') || a.tagName }; })()`;
+async function typeQuery(q) {
+  await ev(`(() => { const i = document.getElementById('wm-q'); i.value = ${JSON.stringify(q)}; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await sleep(350); // search input is debounced
+}
+
+let failed = 0;
+let tag = '';
+const report = (ok, name, extra = '') => { if (!ok) failed++; console.log(`${ok ? 'PASS' : 'FAIL'} ${tag}${name}${!ok && extra ? ' -- ' + extra : ''}`); };
+const modeArg = argOf('--mode') || 'both';
+const modes = modeArg === 'both' ? ['light', 'dark'] : [modeArg];
+async function viewport(width, height) {
+  await send('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false });
+}
+async function setMode(mode) {
+  await send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-color-scheme', value: mode }] });
+}
+
+try {
+  await connect();
+  await send('Runtime.enable'); await send('Page.enable');
+  for (const mode of modes) {
+  tag = `[${mode}] `;
+  await setMode(mode);
+  await viewport(1440, 900);
+
+  // 1. tree
+  await load(htmlPath);
+  const scheme = await ev(`({ dark: matchMedia('(prefers-color-scheme: dark)').matches, bg: getComputedStyle(document.body).backgroundColor, ink: getComputedStyle(document.body).color })`);
+  // lightness 0..1 of a computed colour, oklch() or rgb()
+  const lum = (c) => { const n = (c.match(/[\d.]+/g) || []).map(Number); return /^oklch/.test(c) ? n[0] : (n[0] + n[1] + n[2]) / 765; };
+  report(scheme.dark === (mode === 'dark') && (mode === 'dark' ? lum(scheme.bg) < lum(scheme.ink) : lum(scheme.bg) > lum(scheme.ink)), `${mode} colour scheme applies`, JSON.stringify(scheme));
+  const treePaths = await ev(`Array.from(document.querySelectorAll('#wm-tree a[data-path]')).map(a => a.dataset.path).sort()`);
+  report(JSON.stringify(treePaths) === JSON.stringify(fixtureFiles), 'tree shows all fixture files', JSON.stringify(treePaths));
+  await ev(`(() => { const f = document.getElementById('wm-filter'); f.value = 'arab'; f.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  report((await ev(`document.querySelectorAll('#wm-tree a[data-path]').length`)) === 1, 'tree filter narrows by name');
+  await ev(`(() => { const f = document.getElementById('wm-filter'); f.value = ''; f.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+
+  // 2. search "mermaid" via the "/" key
+  await ev(`document.body.focus()`);
+  await key('/');
+  report(await ev(`!document.getElementById('wm-search').hidden`), 'slash key opens search panel');
+  await typeQuery('mermaid');
+  const hit = await ev(`(() => { const li = document.querySelector('#wm-results li[data-path="docs/waymark/x.md"]');
+    return li ? { n: document.querySelectorAll('#wm-results li').length, title: li.querySelector('[data-role=title]').textContent, snippet: li.querySelector('[data-role=snippet]').textContent, marks: li.querySelectorAll('mark').length } : null; })()`);
+  report(!!hit && /mermaid/i.test(hit.snippet) && hit.snippet.length <= 125 && hit.marks > 0 && hit.title === 'Waymark design notes',
+    'search "mermaid" finds nested doc with snippet', JSON.stringify(hit));
+  await typeQuery('capture flow');
+  report((await ev(`document.querySelectorAll('#wm-results li').length`)) === 1, 'multi-word AND search');
+
+  // 3. ID jump
+  await typeQuery('G-0001');
+  await until(`location.hash.endsWith(':G-0001')`);
+  const jump = await ev(`({ hash: decodeURIComponent(location.hash), target: document.querySelector('[data-target]')?.textContent || '', hidden: document.getElementById('wm-search').hidden })`);
+  await until(`document.querySelector('[data-target]')`);
+  const target = await ev(`document.querySelector('[data-target]')?.id`);
+  report(jump.hash === '#gotchas.md:G-0001' && target === 'entry-G-0001' && jump.hidden, 'search G-0001 jumps to the entry', JSON.stringify({ jump, target }));
+
+  // closing search cancels a pending debounced ID jump
+  await ev(`document.body.focus()`);
+  await key('/');
+  const before = await ev(`location.hash`);
+  await ev(`(() => { const i = document.getElementById('wm-q'); i.value = 'G-0002'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  // dispatched on the document: a real Escape inside type=search also clears the field natively,
+  // which fires its own input event and would hide a missing clearTimeout
+  await ev(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))`);
+  await sleep(350);
+  const deb = await ev(`({ hash: location.hash, hidden: document.getElementById('wm-search').hidden })`);
+  report(deb.hidden && deb.hash === before && !deb.hash.endsWith(':G-0002'), 'Escape cancels the pending search debounce (no late ID jump)', JSON.stringify({ before, deb }));
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await ev(`(() => { const i = document.getElementById('wm-q'); i.value = 'G-0002'; i.dispatchEvent(new Event('input', { bubbles: true })); })()`);
+  await ev(`document.getElementById('wm-search-close').click()`);
+  await sleep(350);
+  report((await ev(`location.hash`)) === before, 'Close button cancels the pending search debounce');
+
+  // the search panel is modal: Tab stays inside, a backdrop click closes it without reaching the page,
+  // and every dismissal (Escape, Close, backdrop) returns focus to the Search button
+  await ev(`document.getElementById('wm-search-open').click()`);
+  report(await ev(`!document.getElementById('wm-search-backdrop').hidden && document.activeElement.id === 'wm-q'`), 'search opens over a backdrop with focus in the field');
+  await typeQuery('offline');
+  await until(`document.querySelector('#wm-results a')`);
+  const seen = new Set(); let inside = true;
+  for (const mod of [0, 0, 0, 0, 0, 0, 8, 8, 8, 8]) {
+    await key('Tab', mod);
+    const f = await ev(focusInfo);
+    if (!f.inSearch) inside = false;
+    seen.add(f.key);
+  }
+  report(inside && seen.size >= 3, 'Tab and Shift+Tab stay inside the search panel', JSON.stringify([...seen]));
+  const link = await ev(`(() => { const r = document.querySelector('#wm-tree a[data-path="decisions.md"]').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+  await click(link.x, link.y);
+  await sleep(200);
+  const bd = await ev(`({ panel: document.getElementById('wm-search').hidden, backdrop: document.getElementById('wm-search-backdrop').hidden, focus: document.activeElement.id, hash: location.hash })`);
+  report(bd.panel && bd.backdrop && bd.focus === 'wm-search-open' && bd.hash === before, 'backdrop click closes search, returns focus to Search and does not reach the tree link under it', JSON.stringify(bd));
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await key('Escape');
+  report(await ev(`document.getElementById('wm-search').hidden && document.activeElement.id === 'wm-search-open'`), 'Escape closes search and returns focus to Search');
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await ev(`document.getElementById('wm-search-close').click()`);
+  report(await ev(`document.getElementById('wm-search').hidden && document.getElementById('wm-search-backdrop').hidden && document.activeElement.id === 'wm-search-open'`), 'Close button closes search and returns focus to Search');
+
+  // snippets read as text, not markdown
+  await ev(`document.getElementById('wm-search-open').click()`);
+  await typeQuery('offline');
+  await until(`document.querySelector('#wm-results li[data-path="decisions.md"]')`);
+  const snip = await ev(`document.querySelector('#wm-results li[data-path="decisions.md"] [data-role=snippet]').textContent`);
+  report(/offline/i.test(snip) && !/\*\*|##|^---|\s---\s|`|\|/.test(snip), 'search snippet has no markdown syntax', JSON.stringify(snip));
+  await key('Escape');
+
+  // 4. mermaid renders
+  await ev(`location.hash = '#docs/waymark/x.md'`);
+  const mm = await until(`document.querySelector('#wm-body figure[data-mermaid] svg')`, 30000);
+  report(mm && (await ev(`/Session/.test(document.querySelector('#wm-body figure[data-mermaid] svg').textContent) && /Capture/.test(document.querySelector('#wm-body figure[data-mermaid] svg').textContent)`)), 'mermaid diagram renders to svg with its labels', JSON.stringify(await ev(`document.getElementById('wm-article').innerText.slice(0, 300)`)));
+  const hdr = await ev(`({ expired: !!document.querySelector('#wm-entry-header [data-state=expired]'), title: document.querySelector('#wm-entry-header h1')?.textContent })`);
+  report(hdr.expired && hdr.title === 'Waymark design notes', 'frontmatter header shows expired valid_until', JSON.stringify(hdr));
+  report(await ev(`!!document.querySelector('#wm-body a[data-entry-link="G-0001"]')`), 'ID token becomes a link');
+
+  // 5. </script> file renders as text, nothing executes
+  await ev(`location.hash = '#docs/script-tag.md'`);
+  await until(`document.getElementById('wm-article').dataset.path === 'docs/script-tag.md'`);
+  const st = await ev(`({ text: document.getElementById('wm-body').innerText, pwned: window.__pwned === true,
+    scripts: document.querySelectorAll('#wm-body script').length, onerror: !!document.querySelector('#wm-body [onerror]') })`);
+  report(st.text.includes('</script>') && st.text.includes('<!-- not a comment -->') && !st.pwned && !st.scripts && !st.onerror,
+    '</script> file renders as text and is sanitised', JSON.stringify(st));
+
+  // 6. Arabic
+  await ev(`location.hash = '#docs/arabic.md'`);
+  await until(`document.getElementById('wm-article').dataset.path === 'docs/arabic.md'`);
+  const ar = await ev(`document.getElementById('wm-article').innerText`);
+  report(ar.includes('هذا نص عربي للاختبار') && ar.includes('ملاحظات عربية'), 'Arabic text renders');
+  await ev(`location.hash = '#docs/crlf.md'`);
+  await until(`document.getElementById('wm-article').dataset.path === 'docs/crlf.md'`);
+  report(await ev(`document.getElementById('wm-body').innerText.includes('Crlf file') && document.querySelector('#wm-entry-header h1').textContent === 'Crlf'`), 'CRLF file renders with frontmatter');
+
+  // same-page anchor, missing and escaping links
+  await ev(`location.hash = '#docs/waymark/x.md'`);
+  await until(`document.querySelector('#wm-body a[data-anchor]')`);
+  const anc = await ev(`(() => { const a = document.querySelector('#wm-body a[data-anchor]'); a.click();
+    return { path: document.getElementById('wm-article').dataset.path, hash: decodeURIComponent(location.hash), err: !!document.getElementById('wm-error') }; })()`);
+  report(anc.path === 'docs/waymark/x.md' && anc.hash === '#docs/waymark/x.md' && !anc.err, 'same-page #section link keeps the article', JSON.stringify(anc));
+  const miss = await ev(`({ missing: !!document.querySelector('#wm-body a[data-missing="docs/waymark/nowhere.md"]:not([href])'),
+    escape: document.querySelector('#wm-body a[href="../../../../x.md"]') !== null && !document.querySelector('#wm-body a[href="../../../../x.md"][data-internal]') })`);
+  report(miss.missing && miss.escape, 'missing .md link marked, underflowing link left alone', JSON.stringify(miss));
+
+  // 7. link between files, 8. back button
+  await ev(`location.hash = '#docs/waymark/x.md'`);
+  await until(`document.querySelector('#wm-body a[data-internal]')`);
+  await ev(`document.querySelector('#wm-body a[data-internal="decisions.md"]').click()`);
+  await until(`document.getElementById('wm-article').dataset.path === 'decisions.md'`);
+  report((await ev(`decodeURIComponent(location.hash)`)) === '#decisions.md' && (await ev(`document.getElementById('wm-body').innerText.includes('Keep the viewer offline')`)),
+    'link between files opens the target file');
+  await ev(`history.back()`);
+  await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+  report((await ev(`decodeURIComponent(location.hash)`)) === '#docs/waymark/x.md', 'back button returns to the previous file');
+
+  // refresh keeps the view
+  await send('Page.reload');
+  await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+  report(await ev(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`), 'reload restores the view from the hash');
+
+  // search result opening highlights matches
+  await ev(`document.body.focus()`);
+  await key('/');
+  await typeQuery('offline');
+  // the reloaded page may still be loading mermaid, which can hold the debounce timer past the fixed wait
+  await until(`document.querySelector('#wm-results li[data-path="decisions.md"] a')`);
+  await ev(`document.querySelector('#wm-results li[data-path="decisions.md"] a').click()`);
+  await until(`document.getElementById('wm-article').dataset.path === 'decisions.md'`);
+  await until(`document.querySelector('#wm-body mark')`);
+  report(await ev(`document.querySelector('#wm-body mark').textContent.toLowerCase() === 'offline'`), 'opening a result highlights matches');
+
+  // empty state
+  await load(emptyHtml);
+  report(await ev(`document.getElementById('wm-empty') && document.getElementById('wm-article').dataset.state === 'empty'`), 'empty state for a layer with no files');
+
+  }
+  tag = '';
+
+  // layout: 375 (sidebar is a menu, no sideways scroll) and 1440 (sidebar shown)
+  for (const mode of modes) {
+    tag = `[${mode}] `;
+    await setMode(mode);
+    await viewport(375, 812);
+    await load(htmlPath);
+    await ev(`location.hash = '#docs/waymark/x.md'`);
+    await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+    const n = await ev(`(() => { const nav = document.getElementById('wm-nav'), t = document.getElementById('wm-nav-toggle');
+      return { sw: document.documentElement.scrollWidth, bw: document.body.scrollWidth, iw: innerWidth, nav: getComputedStyle(nav).display, toggle: getComputedStyle(t).display, exp: t.getAttribute('aria-expanded') }; })()`);
+    report(n.sw <= n.iw && n.bw <= n.iw, '375px: no horizontal scroll', JSON.stringify(n));
+    report(n.nav === 'none' && n.toggle !== 'none' && n.exp === 'false', '375px: sidebar collapsed behind the Files menu button', JSON.stringify(n));
+    await ev(`document.getElementById('wm-nav-toggle').click()`);
+    const o = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded'), sw: document.documentElement.scrollWidth, iw: innerWidth })`);
+    report(o.nav !== 'none' && o.exp === 'true' && o.sw <= o.iw, '375px: Files button opens the tree', JSON.stringify(o));
+    await ev(`(() => { const a = document.querySelector('#wm-tree a[data-path="gotchas.md"]'); a.focus(); a.click(); })()`);
+    await until(`document.getElementById('wm-article').dataset.path === 'gotchas.md'`);
+    const c = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded') })`);
+    report(c.nav === 'none' && c.exp === 'false', '375px: choosing a file closes the menu', JSON.stringify(c));
+    await until(`document.activeElement && document.activeElement.tagName === 'H1'`, 3000);
+    const cf = await ev(focusInfo);
+    report(cf.inArticle && cf.tag === 'H1', '375px: choosing a file from the menu moves focus to the article heading', JSON.stringify(cf));
+    await ev(`document.getElementById('wm-nav-toggle').click()`);
+    await ev(`document.querySelector('#wm-tree a[data-path="decisions.md"]').focus()`);
+    await key('Escape');
+    const ef = await ev(`({ nav: getComputedStyle(document.getElementById('wm-nav')).display, exp: document.getElementById('wm-nav-toggle').getAttribute('aria-expanded'), focus: document.activeElement.id })`);
+    report(ef.nav === 'none' && ef.exp === 'false' && ef.focus === 'wm-nav-toggle', '375px: Escape closes the menu and returns focus to Files', JSON.stringify(ef));
+    await viewport(1440, 900);
+    await load(htmlPath);
+    await ev(`location.hash = '#docs/waymark/x.md'`);
+    await until(`document.getElementById('wm-article').dataset.path === 'docs/waymark/x.md'`);
+    // prose measure in ch: the paragraph box against the width of a "0" in the paragraph's own font
+    const w = await ev(`(() => { const nav = document.getElementById('wm-nav'), p = document.querySelector('#wm-body p');
+      const z = document.createElement('span'); z.textContent = '0'; z.style.position = 'absolute'; p.appendChild(z); const ch = z.getBoundingClientRect().width; z.remove();
+      return { sw: document.documentElement.scrollWidth, iw: innerWidth, nav: getComputedStyle(nav).display, navW: Math.round(nav.getBoundingClientRect().width), toggle: getComputedStyle(document.getElementById('wm-nav-toggle')).display, pCh: Math.round(p.getBoundingClientRect().width / ch) }; })()`);
+    report(w.sw <= w.iw && w.nav !== 'none' && w.navW > 200 && w.toggle === 'none' && w.pCh >= 45 && w.pCh <= 75, '1440px: sidebar shown, no menu button, prose measure 45 to 75ch, no horizontal scroll', JSON.stringify(w));
+  }
+  tag = '';
+
+  // scripting off: the notice shows and controls that cannot work are hidden
+  await send('Emulation.setScriptExecutionDisabled', { value: true });
+  await send('Page.navigate', { url: pathToFileURL(htmlPath).href });
+  await sleep(800);
+  const ns = await send('Runtime.evaluate', { expression: `JSON.stringify({ notice: !!document.getElementById('wm-noscript') && getComputedStyle(document.getElementById('wm-noscript')).display !== 'none',
+    search: getComputedStyle(document.getElementById('wm-search-open')).display, filter: getComputedStyle(document.getElementById('wm-filter')).display,
+    article: getComputedStyle(document.getElementById('wm-article')).display })`, returnByValue: true });
+  await send('Emulation.setScriptExecutionDisabled', { value: false });
+  const nso = JSON.parse(ns.result.result.value || '{}');
+  report(nso.notice && nso.search === 'none' && nso.filter === 'none' && nso.article === 'none', 'scripting off: notice shown, search, filter and article hidden', JSON.stringify(nso));
+
+  report(problems.length === 0, 'no page errors or console errors', problems.slice(0, 3).join(' | '));
+} catch (e) {
+  failed++;
+  console.log(`FAIL harness error -- ${e.stack || e}`);
+} finally {
+  try { ws?.close(); } catch { /* ignore */ }
+  chrome.kill();
+  await sleep(300);
+  if (!args.includes('--keep')) { try { rmSync(tmp, { recursive: true, force: true }); } catch { /* profile still locked */ } }
+}
+console.log(failed ? `${failed} check(s) FAILED` : 'all checks passed');
+process.exit(failed ? 1 : 0);

@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# waymark PreToolUse hook (spec section 8).
+#   Bash        -> command matches a playbook trigger: inject that playbook's checklist
+#   Write|Edit  -> auto-memory path while replace_auto_memory=yes: deny, point to `waymark record`
+# Runs before EVERY Bash/Write/Edit call: with no playbooks and replacement off
+# it exits after builtins only. Always exits 0, prints valid JSON or nothing.
+# No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+pr_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && pr_dir="$PWD" ;;
+  *) pr_dir="$PWD" ;;
+esac
+pr_plugin="${pr_dir%/*}"
+. "$pr_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard PreToolUse
+
+# pr_playbook <file> <command> -> appends to PR_OUT when a trigger matches
+pr_playbook() {
+  local f="$1" cmd="$2" line state=0 tag="" re rc matched=0 list="" inlist=0 sect=0 nl=$'\n' name show
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$state" in
+      0) [ "$line" = '---' ] && state=1 || state=3 ;;          # no frontmatter: only the sections matter
+      1)
+        case "$line" in
+          '---') state=3; inlist=0 ;;
+          'tag:'*) tag="${line#tag:}"; tag="${tag#"${tag%%[![:space:]]*}"}"; tag="${tag%"${tag##*[![:space:]]}"}"; inlist=0 ;;
+          'triggers:'*) inlist=1 ;;
+          [[:space:]]*-[[:space:]]*|-[[:space:]]*)
+            if [ "$inlist" = 1 ] && [ "$matched" = 0 ]; then
+              re="${line#*-}"; re="${re#"${re%%[![:space:]]*}"}"; re="${re%"${re##*[![:space:]]}"}"
+              case "$re" in
+                \"*\") re="${re#\"}"; re="${re%\"}" ;;
+                \'*\') re="${re#\'}"; re="${re%\'}" ;;
+              esac
+              if [ -n "$re" ]; then
+                [[ $cmd =~ $re ]]; rc=$?
+                [ "$rc" != 0 ] || matched=1
+              fi
+            fi ;;
+          *) inlist=0 ;;
+        esac ;;
+    esac
+    if [ "$state" = 3 ]; then
+      case "$line" in
+        '## Before running a trigger command'*) sect=1 ;;
+        '## '*) sect=0 ;;
+        '- [ ]'*) [ "$sect" = 1 ] && list="${list:+$list$nl}$line" ;;
+      esac
+    fi
+  done < "$f"
+  [ "$matched" = 1 ] && [ -n "$list" ] || return 0
+  name="${f##*/}"; name="${name%.md}"
+  show="${cmd%%$'\n'*}"
+  wm__cut "$show" 80; show="$WM_CL"
+  PR_OUT="${PR_OUT:+$PR_OUT$nl$nl}Checklist before \`$show\` (playbooks/${tag:-$name}.md):$nl$list"
+}
+
+# pr_ci <string> -> PR_CI : glob pattern that matches the string case-insensitively
+# (letters become [xX] pairs, glob metacharacters are escaped). No forks.
+pr_ci() {
+  local s="$1" c out="" lo=abcdefghijklmnopqrstuvwxyz up=ABCDEFGHIJKLMNOPQRSTUVWXYZ pre
+  while [ -n "$s" ]; do
+    c="${s:0:1}"; s="${s:1}"
+    case "$c" in
+      [a-z]) pre="${lo%%"$c"*}"; out="$out[$c${up:${#pre}:1}]" ;;
+      [A-Z]) pre="${up%%"$c"*}"; out="$out[${lo:${#pre}:1}$c]" ;;
+      '*'|'?'|'['|']'|'\') out="$out\\$c" ;;
+      *) out="$out$c" ;;
+    esac
+  done
+  PR_CI="$out"
+}
+
+# pr_is_memory <path> : rc 0 when the path is in Claude Code's auto-memory store
+# (<config dir>/projects/<project>/memory/..., config dir = ~/.claude or
+# $CLAUDE_CONFIG_DIR). Case-insensitive, either slash direction, C:/ or /c/.
+# A relocated autoMemoryDirectory (settings.json) is deliberately not covered.
+pr_is_memory() {
+  local p="${1//\\//}" cfg tail_ rest
+  pr_ci "/projects"; tail_="$PR_CI/*"; pr_ci "/memory/"; tail_="$tail_$PR_CI*"
+  pr_ci "/.claude"
+  # shellcheck disable=SC2254
+  case "$p" in *$PR_CI$tail_) return 0 ;; esac
+  cfg="${CLAUDE_CONFIG_DIR:-}"
+  [ -n "$cfg" ] || return 1
+  cfg="${cfg//\\//}"; cfg="${cfg%/}"
+  [ -n "$cfg" ] || return 1
+  pr_ci "$cfg"
+  # shellcheck disable=SC2254
+  case "$p" in $PR_CI$tail_) return 0 ;; esac
+  case "$cfg" in
+    [A-Za-z]:/*) rest="/${cfg:0:1}${cfg:2}" ;;                    # C:/x -> /c/x
+    /[A-Za-z]/*) rest="${cfg:1:1}:${cfg:2}" ;;                    # /c/x -> C:/x
+    *) return 1 ;;
+  esac
+  pr_ci "$rest"
+  # shellcheck disable=SC2254
+  case "$p" in $PR_CI$tail_) return 0 ;; esac
+  return 1
+}
+
+pr_main() {
+  local layer rep f have=0 cmd head
+  local h_tool_name h_tool_input_command h_tool_input_file_path h__missing
+  PR_OUT=""
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+  wm__conf_get "$layer/layer.conf" replace_auto_memory; rep="$WM_CV"
+  for f in "$layer"/playbooks/*.md; do [ -f "$f" ] && { have=1; break; }; done
+  [ "$rep" = yes ] || [ "$have" = 1 ] || return 0
+
+  # Bash with no playbooks has nothing to do (the deny check is Write/Edit
+  # only): decide from the head of stdin and skip the awk spawn.
+  IFS= read -r -n 1500 head
+  if [ "$have" = 0 ]; then
+    case "$head" in *'"tool_name":"Bash"'*) return 0 ;; esac
+  fi
+
+  # commands are only matched on their first 2 KB; a path is never that long
+  WM_PRE="$head" WM_MAXV=2048 wm_json_read_stdin h tool_name tool_input.command tool_input.file_path
+
+  case "$h_tool_name" in
+    Bash)
+      [ "$have" = 1 ] && [ -n "$h_tool_input_command" ] || return 0
+      cmd="$h_tool_input_command"
+      for f in "$layer"/playbooks/*.md; do
+        [ -f "$f" ] && pr_playbook "$f" "$cmd"
+      done
+      [ -z "$PR_OUT" ] || wm_emit_context PreToolUse "$PR_OUT"
+      ;;
+    Write|Edit)
+      [ "$rep" = yes ] && [ -n "$h_tool_input_file_path" ] || return 0
+      if pr_is_memory "$h_tool_input_file_path"; then
+        wm_emit_deny 'waymark replaces built-in auto-memory here. Use `waymark record …` instead.'
+      fi
+      ;;
+  esac
+  return 0
+}
+
+pr_main
+exit 0

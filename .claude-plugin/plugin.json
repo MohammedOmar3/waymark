@@ -1,0 +1,8 @@
+{
+  "name": "waymark",
+  "version": "0.1.0",
+  "description": "Git-native, self-distilling memory for Claude Code: capture, recall, playbooks and an offline viewer — bash and git only.",
+  "author": { "name": "Mohammed Omar" },
+  "license": "MIT",
+  "keywords": ["memory", "context", "gotchas", "decisions", "notebook"]
+}

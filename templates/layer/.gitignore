@@ -1,0 +1,8 @@
+active/*.md
+inbox/
+.view/
+.locks/
+*.log
+*.tmp
+*.bak
+active/.compact-pending-*

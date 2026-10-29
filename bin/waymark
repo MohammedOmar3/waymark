@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# waymark dispatcher: waymark <cmd> [args]  ->  bin/cmd/<cmd>.sh
+wm_here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$wm_here/lib.sh" || exit 2
+
+wm_usage() {
+  printf 'usage: waymark <command> [args]\n' >&2
+  printf 'commands:'  >&2
+  for f in "$wm_here"/cmd/*.sh; do
+    [ -f "$f" ] || continue
+    f="${f##*/}"; printf ' %s' "${f%.sh}" >&2
+  done
+  printf '\n' >&2
+}
+
+wm_cmd="${1:-}"
+[ $# -gt 0 ] && shift
+case "$wm_cmd" in
+  ''|*[!a-z0-9-]*) wm_usage; exit 64 ;;
+esac
+if [ ! -f "$wm_here/cmd/$wm_cmd.sh" ]; then
+  wm_usage; exit 64
+fi
+. "$wm_here/cmd/$wm_cmd.sh"

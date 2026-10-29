@@ -1,0 +1,11 @@
+{
+  "name": "waymark",
+  "owner": { "name": "Mohammed Omar" },
+  "plugins": [
+    {
+      "name": "waymark",
+      "source": "./",
+      "description": "Git-native, self-distilling memory for Claude Code: capture, recall, playbooks and an offline viewer — bash and git only."
+    }
+  ]
+}

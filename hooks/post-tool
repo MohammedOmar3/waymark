@@ -1,0 +1,208 @@
+#!/usr/bin/env bash
+# waymark PostToolUse / PostToolUseFailure hook (spec section 8).
+#   Write|Edit            -> add the path to this session's active file ("files touched")
+#   Bash failure          -> recall known gotchas by Match:, capture a failure candidate
+#   Bash success          -> nothing (decided from the first bytes of stdin, no forks)
+# Runs after EVERY Bash/Write/Edit call: latency matters (each process spawn is
+# ~70 ms on Git Bash), so everything is builtins plus one awk for the JSON.
+# Always exits 0, prints valid JSON or nothing. No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+pt_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && pt_dir="$PWD" ;;
+  *) pt_dir="$PWD" ;;
+esac
+pt_plugin="${pt_dir%/*}"
+. "$pt_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard PostToolUse
+
+
+# pt_files_touched <layer> <id8> <file_path> <cwd>
+pt_files_touched() {
+  local layer="$1" id8="$2" fp="$3" cwd="$4" act="" f root d rel line list="" item rest found=0 out="" nl=$'\n' lk
+  fp="${fp//\\//}"          # Windows separators; msys accepts C:/ paths as they are
+  cwd="${cwd//\\//}"
+  [ -n "$fp" ] || return 0
+  for f in "$layer"/active/*"--$id8.md"; do [ -f "$f" ] && { act="$f"; break; }; done
+  [ -n "$act" ] || return 0
+  # Layer files (the active file itself, layer docs) are not "files touched".
+  # Builtin test -ef per parent dir, so C:/ and /c/ spellings both match.
+  case "$fp" in "$layer"/*) return 0 ;; esac
+  d="${fp%/*}"
+  while [ -n "$d" ]; do
+    [ "$d" -ef "$layer" ] && return 0
+    [ "$d" != "${d%/*}" ] || break
+    d="${d%/*}"
+  done
+  # Relative to the SESSION's repo root (nearest .git above cwd, lexical walk);
+  # files outside it (another repo, a submodule's parent) stay absolute.
+  d="${cwd%/}"; root=""
+  while [ -n "$d" ]; do
+    if [ -e "$d/.git" ]; then root="$d"; break; fi
+    [ "$d" != "${d%/*}" ] || break
+    d="${d%/*}"
+  done
+  rel="$fp"
+  [ -z "$root" ] || case "$fp" in "$root"/*) rel="${fp#"$root"/}" ;; esac
+
+  # read-only pre-check: no lock and no write when it is already listed
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      'files touched:'*)
+        list="${line#files touched:}"
+        rest=", ${list# }, "
+        case "$rest" in *", $rel, "*) return 0 ;; esac
+        break ;;
+    esac
+  done < "$act"
+
+  lk="active-$id8"
+  wm__lockq "$layer" "$lk" || return 0
+  # re-read under the lock, then rewrite in place (small file; the lock keeps writers apart)
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%$'\r'}"
+    case "$line" in
+      'files touched:'*)
+        list="${line#files touched:}"; list="${list# }"
+        rest=", $list, "
+        case "$rest" in *", $rel, "*) ;; *) if [ -n "$list" ]; then list="$list, $rel"; else list="$rel"; fi ;; esac
+        out="$out""files touched: $list""$nl"; found=1 ;;
+      *) out="$out$line$nl" ;;
+    esac
+  done < "$act"
+  if [ "$found" = 0 ]; then out="${out}files touched: $rel$nl"; fi
+  printf '%s' "$out" > "$act" 2>/dev/null
+  wm__unlockq "$layer" "$lk"
+  return 0
+}
+
+# pt_recall <layer> <id8> <repo> <event> <raw escaped output>
+# grep -F each non-obsolete gotcha's Match: against the output. The output is
+# compared in its JSON-escaped form (the Match is escaped the same way), so the
+# 64 KB are never unescaped.
+pt_recall() {
+  local layer="$1" id8="$2" repo="$3" ev="$4" raw="$5" nocr="" file line st m heading cause fix gid hit=0 hits=0 ctx="" incom=0 nl=$'\n'
+  file="$layer/gotchas.md"
+  [ -f "$file" ] || return 0
+  case "$raw" in *'\r'*) nocr="${raw//\\r/}" ;; esac
+  gid=""; st=""; m=""; heading=""; cause=""; fix=""
+  while :; do
+    if IFS= read -r line; then :; else
+      [ -n "$line" ] || line="@@EOF@@"
+    fi
+    line="${line%$'\r'}"
+    if [ "$line" != "@@EOF@@" ]; then
+      # ignore format examples inside HTML comments
+      if [ "$incom" = 1 ]; then
+        case "$line" in *'-->'*) incom=0 ;; esac
+        continue
+      fi
+      case "$line" in
+        *'<!--'*) case "$line" in *'-->'*) ;; *) incom=1 ;; esac; continue ;;
+      esac
+    fi
+    case "$line" in
+      '## '*|@@EOF@@)
+        if [ -n "$gid" ] && [ -n "$m" ] && [ "$st" != obsolete ]; then
+          wm__escape "$m"
+          hit=0
+          case "$raw" in *"$WM_E"*) hit=1 ;; esac
+          if [ "$hit" = 0 ] && [ -n "$nocr" ]; then case "$nocr" in *"$WM_E"*) hit=1 ;; esac; fi
+          if [ "$hit" = 1 ]; then
+            hits=$((hits + 1))
+            ctx="${ctx:+$ctx$nl$nl}$heading${cause:+$nl$cause}${fix:+$nl$fix}"
+            wm__now
+            [ -d "$layer/stats" ] || mkdir -p "$layer/stats" 2>/dev/null
+            [ -s "$layer/stats/recall.tsv" ] || printf 'date\tsession\tid\trepo\n' >> "$layer/stats/recall.tsv" 2>/dev/null
+            printf '%s\t%s\t%s\t%s\n' "${WM_NOW%%T*}" "$id8" "$gid" "$repo" >> "$layer/stats/recall.tsv" 2>/dev/null
+            [ "$hits" -lt 3 ] || break
+          fi
+        fi
+        gid=""; st=""; m=""; heading=""; cause=""; fix=""
+        [ "$line" != "@@EOF@@" ] || break
+        case "$line" in
+          '## G-'[0-9]*) gid="${line#'## '}"; gid="${gid%%[ ]*}"; heading="$line" ;;
+        esac ;;
+      '- **Status:**'*) st="${line#'- **Status:**'}"; st="${st#"${st%%[![:space:]]*}"}"; st="${st%"${st##*[![:space:]]}"}" ;;
+      '- **Match:**'*) m="${line#'- **Match:**'}"; m="${m#"${m%%[![:space:]]*}"}"; m="${m%"${m##*[![:space:]]}"}" ;;
+      '- **Cause:**'*) cause="Cause:${line#'- **Cause:**'}" ;;
+      '- **Fix:**'*) fix="Fix:${line#'- **Fix:**'}" ;;
+    esac
+  done < "$file"
+  if [ "$hits" -gt 0 ]; then
+    wm_emit_context "$ev" "Known gotcha matches this failure:$nl$ctx"
+  fi
+  return 0
+}
+
+pt_main() {
+  local head layer id8 keys repo cwd err out code cmd f
+  local h_session_id h_cwd h_hook_event_name h_tool_name h_tool_input_file_path h_tool_input_command h_error h_is_interrupt h__missing
+
+  IFS= read -r -n 1500 head
+  # success + Bash: nothing to do. Decided from the head of stdin before any
+  # layer lookup or JSON parsing (zero forks).
+  case "$head" in
+    *'"hook_event_name":"PostToolUse"'*) case "$head" in *'"tool_name":"Bash"'*) return 0 ;; esac ;;
+  esac
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+
+  # Write/Edit request only session_id, cwd and the path, so the tokenizer
+  # stops early (awk still reads and quote-splits all of stdin, which is linear;
+  # tool_input.content is never requested); everything else gets the full set.
+  keys="session_id cwd hook_event_name tool_name tool_input.file_path tool_input.command error is_interrupt"
+  case "$head" in
+    *'"tool_name":"Write"'*|*'"tool_name":"Edit"'*) keys="session_id cwd tool_input.file_path" ;;
+  esac
+  WM_PRE="$head" WM_MAXV=65536 WM_RAW="error tool_input.command" wm_json_read_stdin h $keys
+
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
+
+  case "$keys" in
+    "session_id cwd tool_input.file_path")
+      pt_files_touched "$layer" "$id8" "$h_tool_input_file_path" "$h_cwd"
+      return 0 ;;
+  esac
+
+  case "$h_tool_name" in
+    Write|Edit) pt_files_touched "$layer" "$id8" "$h_tool_input_file_path" "$h_cwd"; return 0 ;;
+  esac
+
+  # ---- Bash failure (the single interpretation lives in lib.sh) ----
+  wm__bash_failed "$h_hook_event_name" "$h_tool_name" "$h_error" "$h_is_interrupt" || return 0
+  code="$WM_XC"
+  # still JSON-escaped, <= 64 KB. Offsets, not ${x#pat}: a prefix trim is quadratic at this size.
+  err="${h_error:$((${#code} + 10))}"          # after "Exit code N"
+  case "${err:0:2}" in '\r') err="${err:2}" ;; esac
+  case "${err:0:2}" in '\n') err="${err:2}" ;; esac
+
+  # the repo is already in this session's active file name: no git spawns
+  repo=""
+  for f in "$layer"/active/*"--$id8.md"; do
+    [ -f "$f" ] && { repo="${f##*/}"; repo="${repo%"--$id8.md"}"; break; }
+  done
+  if [ -z "$repo" ]; then
+    cwd="$h_cwd"
+    case "$cwd" in *\\*|[A-Za-z]:*) cwd="$(wm_path "$cwd")" ;; esac
+    [ -n "$cwd" ] || cwd="$pt_pwd"
+    wm__repo_name "$cwd"; repo="${WM_RN:-none}"
+  fi
+
+  pt_recall "$layer" "$id8" "$repo" "${h_hook_event_name:-PostToolUseFailure}" "$err"
+
+  # capture: unescape only what the candidate keeps (command <= 300 B, output <= 4 KB)
+  wm__unescape "${h_tool_input_command:0:1200}"; cmd="$WM_U"
+  wm__unescape "${err:0:8192}"; out="$WM_U"
+  wm_inbox_add "$layer" "$id8" new failure "$repo" "$cmd" "$code" "$out" 1
+  return 0
+}
+
+pt_main
+exit 0

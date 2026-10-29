@@ -1,0 +1,96 @@
+#!/usr/bin/env bash
+# waymark Stop hook: the triage gate (spec section 8).
+# Blocks the stop once for this session's `new` candidates (flipping them to
+# `gated`) and on every stop for `mandatory` ones. `gated` and `deferred` never
+# block again. stop_hook_active=true always allows the stop (loop guard).
+# Stop fires on every turn end: the no-candidate path is builtins only (no awk,
+# no subshell) and decides from the head of stdin. Always exits 0, prints valid
+# JSON or nothing. No `set -e`, no heredocs.
+
+PATH="/usr/bin:/bin${PATH:+:$PATH}"
+export LC_ALL=C
+
+st_pwd="$PWD"
+case "$0" in
+  */*|*\\*) cd "${0%[/\\]*}" 2>/dev/null && st_dir="$PWD" ;;
+  *) st_dir="$PWD" ;;
+esac
+st_plugin="${st_dir%/*}"
+. "$st_plugin/bin/lib.sh" 2>/dev/null || exit 0
+wm_hook_guard Stop
+
+st_main() {
+  local head layer id8 quick file rows line id st ids="" n=0 flip="" tmp locked=0 oldifs content
+  local h_session_id h_stop_hook_active h__missing
+
+  wm__layer_find || return 0
+  layer="$WM_LAYER"
+
+  # cheap exit: session_id is the first field of the payload; no inbox content, nothing to do
+  IFS= read -r -n 1500 head
+  quick=""
+  case "$head" in
+    *'"session_id":"'*) quick="${head#*'"session_id":"'}"; quick="${quick%%'"'*}" ;;
+  esac
+  quick="${quick//[!A-Za-z0-9]/}"; quick="${quick:0:8}"
+  if [ -n "$quick" ]; then
+    [ -s "$layer/inbox/$quick.md" ] || return 0
+  fi
+
+  WM_PRE="$head" wm_json_read_stdin h session_id stop_hook_active
+  [ "$h_stop_hook_active" != true ] || return 0
+  id8="${h_session_id//[!A-Za-z0-9]/}"; id8="${id8:0:8}"
+  [ -n "$id8" ] || return 0
+  file="$layer/inbox/$id8.md"
+  [ -s "$file" ] || return 0
+  # builtin pre-scan: only terminal candidates (dismissed/recorded/deferred/gated) means nothing to do
+  content="$(<"$file")"
+  case "$content" in
+    *'— new'*|*'— mandatory'*) ;;
+    *) return 0 ;;
+  esac
+  content=""
+
+  wm_tri_cmd=__lib
+  . "$st_plugin/bin/cmd/triage.sh" 2>/dev/null || return 0
+
+  wm__lockq "$layer" inbox && locked=1
+  rows="$(wm_tri_list_raw "$file")"
+  set -f
+  oldifs="$IFS"; IFS=$'\n'
+  for line in $rows; do
+    IFS="$oldifs"
+    id="${line%%$'\t'*}"; st="${line#*$'\t'}"; st="${st%%$'\t'*}"; st="${st%% *}"
+    case "$st" in
+      new)       ids="${ids:+$ids }$id"; n=$((n + 1)); flip="$flip $id" ;;
+      mandatory) ids="${ids:+$ids }$id"; n=$((n + 1)) ;;
+    esac
+    IFS=$'\n'
+  done
+  IFS="$oldifs"; set +f
+  if [ "$n" -eq 0 ]; then
+    [ "$locked" = 0 ] || wm__unlockq "$layer" inbox
+    return 0
+  fi
+
+  if [ -n "$flip" ] && [ "$locked" = 1 ]; then
+    tmp="$file.tmp.$$"
+    WM_IDS="$flip " awk -v BINMODE=3 '
+    BEGIN { cr = sprintf("%c", 13) }
+    substr($0, 1, 5) == "## I-" {
+      r = substr($0, 4); sp = index(r, " "); id = (sp ? substr(r, 1, sp - 1) : r)
+      rest = (sp ? substr(r, sp + 1) : ""); c = ""
+      if (rest ~ /\r$/) { c = cr; sub(/\r$/, "", rest) }
+      if (rest ~ /— new[ \t]*$/ && index(ENVIRON["WM_IDS"], " " id " ") > 0) { print "## " id " — gated" c; next }
+    }
+    { print }' "$file" > "$tmp" 2>/dev/null && mv -f "$tmp" "$file" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+  fi
+  [ "$locked" = 0 ] || wm__unlockq "$layer" inbox
+
+  wm_emit_block "Triage $n waymark candidate(s) before finishing: $ids. For each run \`waymark record … --from <ID>\`, \`waymark dismiss <ID>\`, or \`waymark defer <ID>\` if still investigating."
+  return 0
+}
+
+st_main
+exit 0
